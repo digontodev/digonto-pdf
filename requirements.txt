@@ -1,4 +1,4 @@
-# Digonto PDF - the ONLY two libraries it uses (shiboken6 is part of Qt for Python).
+# Digonto PDF - the only libraries it uses (shiboken6 is part of Qt for Python; numpy for cleaning scans).
 # Exact versions + SHA-256 fingerprints from PyPI. pip refuses any file that does not match.
 # Install:  pip install --require-hashes --only-binary=:all: -r requirements.txt
 
@@ -25,3 +25,24 @@ PyMuPDF==1.27.2.3 \
     --hash=sha256:a5c1088a87189891a4946ab314a14b7934ac4c5b6077f7e74ebee956f8906d0e \
     --hash=sha256:d20f68ef15195e073071dbc4ae7455257c7889af7584e39df490c0a92728526e \
     --hash=sha256:77691604c5d1d0233827139bbcdea61fd57879c84712b8e49b1f45520f7ab9c2
+
+# numpy: the scan clean-up (straighten, remove dots, white paper). Wheels for Python 3.11-3.13.
+numpy==2.5.5 \
+    --hash=sha256:7da9a248f149cfbb220c6da964a59c8d051d516704f7758acfb81eb382a05d97 \
+    --hash=sha256:b96e9ee49ccbdb5676359f852a4497f7a9c5df6c377d8877f5330d6fd3ff42e4 \
+    --hash=sha256:a3856a97e48ed8371c680fb04120b99fbcc29f2076ebe6dc3deb34f77947c5ca \
+    --hash=sha256:f5e8603f0892d1b848e12124863b5b29af72383ee9b25ddc6fe4967d4c1ee6ef \
+    --hash=sha256:a0750f2156d53446caca85663d0b65d67214e1664b9050454a731ea1418d176a \
+    --hash=sha256:704d819265e5d1064d932968e9ee85fff2103ccc78c05b878c06943ba27b8507 \
+    --hash=sha256:263b2aa236d752b18f90c5107137d24b2e3856d7db37725609f0ab5bcdb58881 \
+    --hash=sha256:919eb420662b0b4ba34889df503f3d5329775b0c1d5f7e5f5af4fba8315b1e30 \
+    --hash=sha256:f6622e32cb46c60bee3b2c7dd7f5c22bdc86fcb8630336b4822ec81c3986111a \
+    --hash=sha256:228e3d90e967495d61ddc79dd64e95267aae3bcf1b1c516a6186429106a0b444 \
+    --hash=sha256:7e71ac4284c700afa654e2d15b1b174166710dca932f24045e5dc92001b5bda0 \
+    --hash=sha256:e0cf407a83118faf0463ade48a4533982f1737c7c58aac29e08855f7d9ad2977 \
+    --hash=sha256:ac910558645a4b006f70596b450712b8564730c1b2ac10291fcedd656d321ec0 \
+    --hash=sha256:ae2b8285d0b4eed24739c3ca9ec0fa424a0247489c01e1d5fe2815a599e11d33 \
+    --hash=sha256:824025655df929268bfe6b47ed91a00d14209a6f760847cf150be446829e1ce4 \
+    --hash=sha256:10396f7c5ebc37d8f3cbdec44e3313912ccc2dc5841cc905de5de54ebbe8e2d3 \
+    --hash=sha256:e0608d1585557b68dcb6a70a41654f7536567960afad79d91752d2863b242b68 \
+    --hash=sha256:e0b87886bb45621d9279dad4ab9f2d154b5db0b019d378c107b8f71527b06a4a

@@ -1,29 +1,63 @@
 {
   "slug": "digonto-pdf",
   "name": "Digonto PDF",
-  "version": "3.2.5",
-  "comment": "Create, shrink, organize, sign and edit PDF files",
+  "version": "4.0.0",
+  "comment": "Organise, clean up, OCR, convert, sign and protect PDF files",
   "entry": "digonto_pdf.py",
-  "files": ["digonto_pdf.py", "digonto_convert.py", "digonto_ui.py", "digonto_sides.py", "requirements.txt", "assets", "README.txt"],
+  "files": [
+    "digonto_pdf.py",
+    "pdf_ops.py",
+    "pdf_panel.py",
+    "pdf_scan.py",
+    "digonto_convert.py",
+    "digonto_ui.py",
+    "digonto_sides.py",
+    "requirements.txt",
+    "assets",
+    "README.txt"
+  ],
   "requirements": "requirements.txt",
-  "check": "import PySide6.QtWidgets, PySide6.QtSvg, pymupdf",
+  "check": "import PySide6.QtWidgets, PySide6.QtSvg, pymupdf, numpy",
   "needs_tk": false,
-  "apt": ["libxcb-cursor0"],
+  "apt": [
+    "libxcb-cursor0"
+  ],
   "macos_min": 13,
   "categories": "Office;Graphics;Utility;",
-  "keywords": "pdf;sign;merge;compress;convert;word;excel;",
+  "keywords": "pdf;sign;merge;split;compress;ocr;scan;convert;word;excel;",
   "wm_class": "digonto-pdf",
-  "extensions": [".pdf"],
-  "uti": ["com.adobe.pdf"],
-  "mime": ["application/pdf", "image/png", "image/jpeg", "image/svg+xml",
-           "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+  "extensions": [
+    ".pdf"
+  ],
+  "uti": [
+    "com.adobe.pdf"
+  ],
+  "mime": [
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/svg+xml",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ],
   "legacy": {
-    "linux": ["~/.local/share/digonto-pdf", "~/.local/share/pdf-toolkit", "~/.local/bin/pdf-toolkit",
-              "~/.local/share/applications/pdf-toolkit.desktop"],
-    "darwin": ["~/Library/Application Support/Digonto PDF", "~/Library/Application Support/PDF Toolkit",
-               "~/Applications/PDF Toolkit.app"],
-    "windows": ["%LOCALAPPDATA%/Digonto PDF", "%LOCALAPPDATA%/PDF Toolkit", "{programs}/Digonto PDF.lnk",
-                "{programs}/PDF Toolkit.lnk", "{desktop}/PDF Toolkit.lnk"]
+    "linux": [
+      "~/.local/share/digonto-pdf",
+      "~/.local/share/pdf-toolkit",
+      "~/.local/bin/pdf-toolkit",
+      "~/.local/share/applications/pdf-toolkit.desktop"
+    ],
+    "darwin": [
+      "~/Library/Application Support/Digonto PDF",
+      "~/Library/Application Support/PDF Toolkit",
+      "~/Applications/PDF Toolkit.app"
+    ],
+    "windows": [
+      "%LOCALAPPDATA%/Digonto PDF",
+      "%LOCALAPPDATA%/PDF Toolkit",
+      "{programs}/Digonto PDF.lnk",
+      "{programs}/PDF Toolkit.lnk",
+      "{desktop}/PDF Toolkit.lnk"
+    ]
   }
 }
