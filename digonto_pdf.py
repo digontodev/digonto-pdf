@@ -29,6 +29,8 @@ except ImportError:
 
 import digonto_convert as conv
 import digonto_ui as ui
+import pdf_ops as ops
+import pdf_panel as panel
 from PySide6.QtCore import (QByteArray, QBuffer, QIODevice, QItemSelectionModel, QPointF, QRect, QTimer, QUrl,
                             QRectF, QSettings, QSize, QStandardPaths, Qt,
                             QThread, Signal)
@@ -41,11 +43,11 @@ from PySide6.QtWidgets import (
     QFrame, QGraphicsView, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListView, QProgressBar, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSlider,
-    QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QTableWidget,
+    QSpinBox, QSplitter, QStackedWidget, QMenu, QStyle, QStyledItemDelegate, QTableWidget,
     QTableWidgetItem, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 APP_NAME = "Digonto PDF"
-APP_VERSION = "3.2.5"
+APP_VERSION = "4.0.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "assets")
 PDF_FILTER = "PDF files (*.pdf *.PDF)"
@@ -118,6 +120,7 @@ def open_pdf(parent, path):
             if not ok:
                 return None
             if doc.authenticate(pw):
+                doc._dg_pw = pw            # kept, so saving does not silently drop the protection
                 break
     if doc.page_count == 0:
         QMessageBox.warning(parent, APP_NAME, "This PDF has no pages.")
@@ -576,6 +579,13 @@ class PageView(QGraphicsView):
         avail = self.viewport().width() - 30
         self.set_zoom(avail / page.rect.width, page)
 
+    def fit_page(self, page):
+        if page is None:
+            return
+        aw = self.viewport().width() - 30
+        ah = self.viewport().height() - 30
+        self.set_zoom(min(aw / page.rect.width, ah / page.rect.height), page)
+
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier and hasattr(self, "zoom_request"):
             self.zoom_request(1.15 if e.angleDelta().y() > 0 else 1 / 1.15)
@@ -978,6 +988,76 @@ class ShrinkJob(QThread):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def thumb_icon(pm):
+    """the same picture when selected (no pink tint over the page)"""
+    ic = QIcon()
+    ic.addPixmap(pm, QIcon.Normal)
+    ic.addPixmap(pm, QIcon.Selected)
+    return ic
+
+
+class PageBox(QLineEdit):
+    """the page number box in the bottom bar (type a number, Enter)"""
+    valueChanged = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        from PySide6.QtGui import QIntValidator
+        self._max = 1
+        self._val = 1
+        self.validator_ = QIntValidator(1, 1, self)
+        self.setValidator(self.validator_)
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedWidth(46)
+        self.setStyleSheet("QLineEdit{border:1px solid #E7E1F0; border-radius:6px; padding:2px; color:#2A1241;"
+                           " font-weight:600; background:white;}")
+        self.editingFinished.connect(self._typed)
+
+    def setMinimum(self, v):
+        pass
+
+    def setMaximum(self, v):
+        self._max = max(1, v)
+        self.validator_.setTop(self._max)
+
+    def maximum(self):
+        return self._max
+
+    def value(self):
+        return self._val
+
+    def setValue(self, v):
+        v = max(1, min(self._max, int(v)))
+        changed = v != self._val
+        self._val = v
+        self.setText(str(v))
+        if changed and not self.signalsBlocked():
+            self.valueChanged.emit(v)
+
+    def _typed(self):
+        try:
+            self.setValue(int(self.text()))
+        except ValueError:
+            self.setText(str(self._val))
+
+
+class PageList(QListWidget):
+    """page thumbnails: drag to change the order"""
+    reordered = Signal(list)              # new order as a list of old page numbers
+
+    def __init__(self):
+        super().__init__()
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+
+    def dropEvent(self, e):
+        before = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+        super().dropEvent(e)
+        after = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+        if after != before and sorted(after) == sorted(before):
+            self.reordered.emit(after)
+
+
 class DocTab(QWidget):
     changed = Signal()                    # name or modified state changed
     openBytes = Signal(bytes, str)        # open a new tab with these bytes (shrunk copy ...)
@@ -1009,82 +1089,111 @@ class DocTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # left: page list
-        self.thumbs = QListWidget()
-        self.thumbs.setFixedWidth(150)
+        # left: the page list (hidden until the Pages icon is pressed)
+        self.pages_box = QFrame()
+        self.pages_box.setObjectName("pagesBox")
+        self.pages_box.setFixedWidth(170)
+        self.pages_box.setStyleSheet("#pagesBox{background:#FBFAFD; border:none; border-right:1px solid #E7E1F0;}")
+        pv = QVBoxLayout(self.pages_box)
+        pv.setContentsMargins(10, 10, 6, 6)
+        pv.setSpacing(4)
+        t = QLabel("PAGES")
+        t.setStyleSheet("color:#6B5F86; font-size:11px; font-weight:700; letter-spacing:1px;")
+        pv.addWidget(t)
+        h = QLabel("Drag to move · Shift/Ctrl to select more · right-click for more")
+        h.setWordWrap(True)
+        h.setStyleSheet("color:#6B5F86; font-size:10.5px;")
+        pv.addWidget(h)
+        self.thumbs = PageList()
         self.thumbs.setIconSize(QSize(110, 150))
         self.thumbs.setSpacing(3)
         self.thumbs.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.thumbs.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.thumbs.setStyleSheet("QListWidget{background:#EDE6F4; border:none; border-right:1px solid #D0C4E1;}"
-                                  "QListWidget::item{padding:3px; color:#1B1040;}"
-                                  "QListWidget::item:selected{background:#C2395C; color:white; border-radius:6px;}")
+        self.thumbs.setStyleSheet("QListWidget{background:transparent; border:none; outline:none;}"
+                                  "QListWidget::item{padding:3px; color:#6B5F86; border-radius:6px;}"
+                                  "QListWidget::item:selected{background:#FCE4EA; color:#2A1241;}")
         self.thumbs.currentRowChanged.connect(self._thumb_clicked)
-        root.addWidget(self.thumbs)
+        self.thumbs.reordered.connect(self._reordered)
+        self.thumbs.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.thumbs.customContextMenuRequested.connect(self._page_menu)
+        pv.addWidget(self.thumbs, 1)
+        self.pages_box.hide()
+        root.addWidget(self.pages_box)
 
-        # centre: tool strip, page, bottom bar
+        # centre: page (or the before/after preview) and the bottom bar
         centre = QWidget()
         cl = QVBoxLayout(centre)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
-        self.strip = QFrame()
-        self.strip.setObjectName("strip")
-        self.strip.setStyleSheet("#strip{background:#FBDCE5; border-bottom:1px solid #D0C4E1;}")
+        self.strip = QFrame()                 # old tool strip, kept for the tool code (it is never shown)
         self.strip_lay = QHBoxLayout(self.strip)
-        self.strip_lay.setContentsMargins(10, 6, 10, 6)
         self.strip.hide()
-        cl.addWidget(self.strip)
         self.view = PageView()
+        self.view.setBackgroundBrush(QColor("#EEE9F4"))
+        self.view.setFrameShape(QFrame.NoFrame)
         self.view.zoom_request = self.zoom_by
         self.view.flip.connect(self._flip)
         self.view.clicked.connect(self.on_click)
         self.view.doubleClicked.connect(self.on_double_click)
         self.view.rectSelected.connect(self.on_rect)
         self.view.hovered.connect(self.on_hover)
-        cl.addWidget(self.view, 1)
+        self.compare = panel.BeforeAfter()
+        self.compare.closed.connect(self.close_preview)
+        self.centre_stack = QStackedWidget()
+        self.centre_stack.addWidget(self.view)
+        self.centre_stack.addWidget(self.compare)
+        cl.addWidget(self.centre_stack, 1)
         bar = QFrame()
         bar.setObjectName("bar")
-        bar.setStyleSheet("#bar{background:#EDE6F4; border-top:1px solid #D0C4E1;}")
+        bar.setFixedHeight(40)
+        bar.setStyleSheet("#bar{background:white; border-top:1px solid #E7E1F0;}"
+                          "#bar QToolButton{border:none; border-radius:7px; padding:3px 8px; color:#2A1241;"
+                          " font-size:14px; font-weight:600;}"
+                          "#bar QToolButton:hover{background:#F1EAF8;}"
+                          "#bar QToolButton#fit{color:#6B5F86; font-size:13px;}"
+                          "#bar QLabel{color:#2A1241; font-size:13px; font-weight:600;}"
+                          "#bar QSpinBox{border:1px solid #E7E1F0; border-radius:6px; padding:2px 4px;}")
         bl = QHBoxLayout(bar)
-        bl.setContentsMargins(10, 4, 10, 4)
-        self.prev_btn = QToolButton()
-        self.prev_btn.setText("<")
-        self.next_btn = QToolButton()
-        self.next_btn.setText(">")
-        self.page_spin = QSpinBox()
-        self.page_spin.setMinimum(1)
-        self.page_lbl = QLabel()
-        bl.addWidget(QLabel("Page"))
-        bl.addWidget(self.prev_btn)
+        bl.setContentsMargins(12, 0, 12, 0)
+        bl.setSpacing(4)
+
+        def tb(text, tip, slot, name=None):
+            b = QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            if name:
+                b.setObjectName(name)
+            b.clicked.connect(slot)
+            bl.addWidget(b)
+            return b
+        self.prev_btn = tb("‹", "Previous page (Page Up)", lambda: self.goto(self.cur - 1))
+        self.page_spin = PageBox()
         bl.addWidget(self.page_spin)
+        self.page_lbl = QLabel()
         bl.addWidget(self.page_lbl)
-        bl.addWidget(self.next_btn)
+        self.next_btn = tb("›", "Next page (Page Down)", lambda: self.goto(self.cur + 1))
         bl.addStretch()
         self.status = QLabel("")
-        self.status.setStyleSheet("color:#6B5C86")
+        self.status.setStyleSheet("color:#6B5F86; font-weight:400;")
         bl.addWidget(self.status)
         bl.addSpacing(14)
-        zo = QToolButton()
-        zo.setText("-")
-        zi = QToolButton()
-        zi.setText("+")
-        fw = QToolButton()
-        fw.setText("Fit width")
-        bl.addWidget(QLabel("Zoom"))
-        bl.addWidget(zo)
-        bl.addWidget(zi)
-        bl.addWidget(fw)
+        tb("−", "Zoom out (Ctrl -)", lambda: self.zoom_by(1 / 1.2))
+        self.zoom_lbl = QLabel("100 %")
+        self.zoom_lbl.setFixedWidth(52)
+        self.zoom_lbl.setAlignment(Qt.AlignCenter)
+        bl.addWidget(self.zoom_lbl)
+        tb("+", "Zoom in (Ctrl +)", lambda: self.zoom_by(1.2))
+        bl.addSpacing(10)
+        tb("Fit width", "The page fills the width (Ctrl 0)", self.fit_width, "fit")
+        tb("Fit page", "The whole page is visible", self.fit_page, "fit")
         cl.addWidget(bar)
         root.addWidget(centre, 1)
 
-        self.prev_btn.clicked.connect(lambda: self.goto(self.cur - 1))
-        self.next_btn.clicked.connect(lambda: self.goto(self.cur + 1))
         self.page_spin.valueChanged.connect(lambda v: self.goto(v - 1))
-        zo.clicked.connect(lambda: self.zoom_by(1 / 1.2))
-        zi.clicked.connect(lambda: self.zoom_by(1.2))
-        fw.clicked.connect(self.fit_width)
         QShortcut(QKeySequence.Delete, self.view, activated=self.remove_selected_sig)
         QShortcut(QKeySequence(Qt.Key_Backspace), self.view, activated=self.remove_selected_sig)
+        QShortcut(QKeySequence.Delete, self.thumbs, activated=self.delete_pages)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._fill_thumbs)
@@ -1095,7 +1204,7 @@ class DocTab(QWidget):
         super().showEvent(e)
         if not self._fitted:
             self._fitted = True
-            QTimer.singleShot(0, self.fit_width)
+            QTimer.singleShot(0, self.fit_page if self.count() > 0 else self.fit_width)
 
     # ---- basics
     def title(self):
@@ -1140,18 +1249,19 @@ class DocTab(QWidget):
         self.thumbs.clear()
         for i in range(n):
             it = QListWidgetItem(str(i + 1))
+            it.setData(Qt.UserRole, i)
             it.setTextAlignment(Qt.AlignHCenter)
             it.setSizeHint(QSize(136, 176))
             self.thumbs.addItem(it)
         self.thumbs.blockSignals(False)
         self._thumb_next = 0
         self.timer.start(0)
-        self.thumbs.setEnabled(n > 1)
         self.page_spin.blockSignals(True)
         self.page_spin.setMaximum(n)
         self.page_spin.setValue(self.cur + 1)
         self.page_spin.blockSignals(False)
         self.page_lbl.setText(f"/ {n}")
+        self.changed.emit()
         self.prev_btn.setEnabled(n > 1)
         self.next_btn.setEnabled(n > 1)
         self.page_spin.setEnabled(n > 1)
@@ -1176,13 +1286,14 @@ class DocTab(QWidget):
                 page = self.doc[i]
                 z = 110.0 / max(page.rect.width, 1)
                 pm = render_page(page, min(z, 150.0 / max(page.rect.height, 1)), 1.0)
-                self.thumbs.item(i).setIcon(QIcon(pm))
+                self.thumbs.item(i).setIcon(thumb_icon(pm))
             except Exception:
                 pass
         if self._thumb_next >= self.thumbs.count():
             self.timer.stop()
 
     def _thumb_clicked(self, row):
+        self._last_sel = self.selected_pages()
         if row >= 0 and row != self.cur:
             self.goto(row, from_list=True)
 
@@ -1227,9 +1338,87 @@ class DocTab(QWidget):
 
     def zoom_by(self, f):
         self.view.set_zoom(self.view.zoom * f, self.page())
+        self._zoom_text()
 
     def fit_width(self):
         self.view.fit_width(self.page())
+        self._zoom_text()
+
+    def fit_page(self):
+        self.view.fit_page(self.page())
+        self._zoom_text()
+
+    def _zoom_text(self):
+        self.zoom_lbl.setText(f"{round(self.view.zoom * 100 / 1.3333)} %")    # 100 % = real size on screen
+
+    # ---- page list
+    def toggle_pages(self, show=None):
+        show = not self.pages_box.isVisible() if show is None else show
+        self.pages_box.setVisible(show)
+        if show:
+            self.thumbs.scrollToItem(self.thumbs.item(self.cur))
+        return show
+
+    def _reordered(self, order):
+        self.apply_pending()
+        self.push_undo()
+        cur_old = self.cur
+        self.doc.select(order)
+        self.cur = order.index(cur_old)
+        sel = [order.index(r) for r in (self._last_sel or [cur_old]) if r in order]
+        self.after_structure(select=sel)
+
+    _last_sel = None
+
+    def _page_menu(self, pos):
+        it = self.thumbs.itemAt(pos)
+        if it is not None and not it.isSelected():
+            self.thumbs.clearSelection()
+            it.setSelected(True)
+            self.goto(self.thumbs.row(it), from_list=True)
+        n = len(self.selected_pages())
+        m = QMenu(self)
+        m.addAction(f"Turn right ({n})" if n > 1 else "Turn right", lambda: self.rotate_pages(90))
+        m.addAction(f"Turn left ({n})" if n > 1 else "Turn left", lambda: self.rotate_pages(-90))
+        m.addSeparator()
+        m.addAction("Copy (duplicate)", self.duplicate_pages)
+        m.addAction("Insert blank page after", self.insert_blank)
+        m.addAction("Insert pages from another PDF …", self.insert_pdf)
+        m.addSeparator()
+        m.addAction("Move up", lambda: self.move_pages(-1))
+        m.addAction("Move down", lambda: self.move_pages(1))
+        m.addAction("Save as a new PDF …", self.extract_pages)
+        m.addSeparator()
+        a = m.addAction(f"Delete ({n})" if n > 1 else "Delete", self.delete_pages)
+        a.setEnabled(n < self.count())
+        m.exec(self.thumbs.mapToGlobal(pos))
+
+    def duplicate_pages(self):
+        rows = self.selected_pages()
+        self.apply_pending()
+        self.push_undo()
+        order = list(range(self.count()))
+        last = rows[-1]
+        order[last + 1:last + 1] = rows
+        self.doc.select(order)
+        new = list(range(last + 1, last + 1 + len(rows)))
+        self.cur = new[0]
+        self.after_structure(select=new)
+
+    def reverse_pages(self):
+        self.apply_pending()
+        self.push_undo()
+        self.doc.select(list(range(self.count() - 1, -1, -1)))
+        self.cur = self.count() - 1 - self.cur
+        self.after_structure()
+
+    # ---- before / after preview
+    def show_preview(self, before, after, note):
+        self.compare.set_images(before, after, note)
+        self.centre_stack.setCurrentIndex(1)
+
+    def close_preview(self):
+        self.centre_stack.setCurrentIndex(0)
 
     def selected_pages(self):
         rows = sorted(self.thumbs.row(i) for i in self.thumbs.selectedItems())
@@ -1246,43 +1435,38 @@ class DocTab(QWidget):
 
     def _label(self, text, grey=False):
         lb = QLabel(text)
+        lb.setWordWrap(True)
         if grey:
-            lb.setStyleSheet("color:#6B5C86")
+            lb.setStyleSheet("color:#6B5F86; font-size:12px;")
         self.strip_lay.addWidget(lb)
         return lb
 
-    def set_tool(self, name):
+    def set_tool(self, name, layout=None):
+        """name: pages | sign | edit | redact | None.  The controls go into `layout` (the tools panel)."""
         self.apply_pending()
-        while self.strip_lay.count():
-            w = self.strip_lay.takeAt(0).widget()
-            if w:
-                w.hide()
-                w.setParent(None)
-                w.deleteLater()
+        if layout is not None:
+            self.strip_lay = layout
         self.tool = name
         self.view.mode = None
         self.view.unsetCursor()
         self.clear_hl()
+        self.close_preview()
         if name is None:
-            self.strip.hide()
             return
-        self.strip.show()
         getattr(self, "_tool_" + name)()
-        self.strip_lay.addStretch()
 
     def _tool_pages(self):
-        self._label("<b>Pages</b>")
-        self._btn("Insert pages from PDF...", self.insert_pdf, "Insert pages of another PDF after the selected page")
+        self.toggle_pages(True)
+        self._label("Drag pages in the list on the left to move them. Shift or Ctrl selects more pages.", grey=True)
+        self._btn("Move up", lambda: self.move_pages(-1), "Move the selected page(s) one place up")
+        self._btn("Move down", lambda: self.move_pages(1), "Move the selected page(s) one place down")
+        self._btn("Copy (duplicate)", self.duplicate_pages, "Copy the selected page(s)")
         self._btn("Insert blank page", self.insert_blank, "An empty page after the selected page")
-        self._btn("Move left", lambda: self.move_pages(-1), "Move the selected page(s) one place up")
-        self._btn("Move right", lambda: self.move_pages(1), "Move the selected page(s) one place down")
-        self._btn("Rotate left", lambda: self.rotate_pages(-90))
-        self._btn("Rotate right", lambda: self.rotate_pages(90))
-        self._btn("Delete", self.delete_pages)
-        self._btn("Extract...", self.extract_pages, "Save the selected pages as a new PDF")
+        self._btn("Insert pages from PDF …", self.insert_pdf, "Insert pages of another PDF after the selected page")
+        self._btn("Reverse the order", self.reverse_pages, "Last page first")
+        self._btn("Delete selected", self.delete_pages)
 
     def _tool_sign(self):
-        self._label("<b>Sign</b>")
         self._btn("Draw new...", self.sig_draw)
         self._btn("Add image...", self.sig_image)
         self.sig_combo = QComboBox()
@@ -1294,10 +1478,9 @@ class DocTab(QWidget):
         self._btn("Remove", self.remove_selected_sig, "Remove the selected signature from the page")
         self._btn("Forget", self.sig_forget, "Delete the chosen signature from your list")
         self._btn("Apply", self.apply_pending, "Write the placed signatures into the PDF")
-        self._label("Drag to move, blue corner to resize.", grey=True)
+        self._label("Drag to move, blue corner to resize. Apply writes it into the PDF.", grey=True)
 
     def _tool_edit(self):
-        self._label("<b>Edit text</b>")
         self.mode_group = QButtonGroup(self)
         for i, (key, label, tip) in enumerate(self.EDIT_MODES):
             rb = QRadioButton(label)
@@ -1309,6 +1492,12 @@ class DocTab(QWidget):
         self.hint = self._label("", grey=True)
         self._mode_changed(next(i for i, m in enumerate(self.EDIT_MODES) if m[0] == self.edit_mode))
         self.load_lines()
+
+    def _tool_redact(self):
+        self._label("Draw a box over anything that must disappear. The text and pictures under it are really "
+                    "removed - not only covered.", grey=True)
+        self.view.mode = "rect"
+        self.view.setCursor(Qt.CrossCursor)
 
     def _tool_shrink(self):
         self._label("<b>Shrink</b>")
@@ -1781,6 +1970,14 @@ class DocTab(QWidget):
         self._edited()
 
     def on_rect(self, r):
+        if self.tool == "redact":
+            page = self.page()
+            fr = fitz.Rect(r.x(), r.y(), r.x() + r.width(), r.y() + r.height()) * page.derotation_matrix
+            self.push_undo()
+            page.add_redact_annot(fr, fill=(0, 0, 0))
+            page.apply_redactions()
+            self._edited()
+            return
         if self.tool != "edit":
             return
         page = self.page()
@@ -1795,7 +1992,7 @@ class DocTab(QWidget):
         self._thumb_next = min(self._thumb_next, self.cur)
         try:
             page = self.page()
-            self.thumbs.item(self.cur).setIcon(QIcon(render_page(page, min(110.0 / page.rect.width, 150.0 / page.rect.height))))
+            self.thumbs.item(self.cur).setIcon(thumb_icon(render_page(page, min(110.0 / page.rect.width, 150.0 / page.rect.height))))
         except Exception:
             pass
 
@@ -1855,74 +2052,9 @@ class DocTab(QWidget):
 
 
 # --------------------------------------------------------------------------
-# Start page: recent PDFs
+# Main window: icon bar | start screen / open PDFs / batch list | tools
 # --------------------------------------------------------------------------
-class HomePage(QWidget):
-    openPath = Signal(str)
-    openDialog = Signal()
-    createDialog = Signal()
-
-    def __init__(self):
-        super().__init__()
-        outer = QHBoxLayout(self)
-        outer.addStretch(1)
-        col = QWidget()
-        col.setMaximumWidth(680)
-        col.setMinimumWidth(380)
-        cl = QVBoxLayout(col)
-        cl.setContentsMargins(0, 28, 0, 28)
-        cl.addWidget(QLabel("<span style='font-size:20px; font-weight:700'>Recent PDFs</span>"))
-        self.list = QListWidget()
-        self.list.setSpacing(2)
-        self.list.setStyleSheet("QListWidget::item{padding:8px 10px;}")
-        self.list.itemActivated.connect(lambda it: self.openPath.emit(it.data(Qt.UserRole)))
-        self.list.itemDoubleClicked.connect(lambda it: self.openPath.emit(it.data(Qt.UserRole)))
-        cl.addWidget(self.list, 1)
-        self.empty = QLabel("No PDF opened yet. Open one, drop a file here, or create a new PDF.")
-        self.empty.setStyleSheet("color:#6B5C86")
-        self.empty.setWordWrap(True)
-        cl.addWidget(self.empty)
-        row = QHBoxLayout()
-        b1 = QPushButton("Open PDF...")
-        ui.primary(b1)
-        b1.clicked.connect(self.openDialog.emit)
-        b2 = QPushButton("Create PDF...")
-        b2.clicked.connect(self.createDialog.emit)
-        b3 = QPushButton("Clear list")
-        b3.clicked.connect(self.clear)
-        row.addWidget(b1)
-        row.addWidget(b2)
-        row.addStretch()
-        row.addWidget(b3)
-        cl.addLayout(row)
-        outer.addWidget(col, 3)
-        outer.addStretch(1)
-        self.refresh()
-
-    def refresh(self):
-        self.list.clear()
-        for p in recent_pdfs():
-            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(os.path.getmtime(p)))
-            it = QListWidgetItem(f"{os.path.basename(p)}\n{os.path.dirname(p)}   -   {when}")
-            it.setData(Qt.UserRole, p)
-            it.setToolTip(p)
-            self.list.addItem(it)
-        self.empty.setVisible(self.list.count() == 0)
-
-    def clear(self):
-        settings().setValue("recent_pdfs", [])
-        self.refresh()
-
-
-# --------------------------------------------------------------------------
-# Main window
-# --------------------------------------------------------------------------
-TOOLS = [("pages", "Pages", "Insert, move, rotate, delete pages"),
-         ("sign", "Sign", "Put your signature on a page"),
-         ("edit", "Edit text", "Change, add or delete text"),
-         ("shrink", "Shrink", "Make the file smaller"),
-         ("add", "Add files", "Add pictures, Word, Excel or text as pages"),
-         ("more", "More", "Page numbers, watermark, password, info")]
+UI_TOOL = {"organise": "pages", "text": "edit", "sign": "sign", "redact": "redact"}
 
 
 class MainWindow(QMainWindow):
@@ -1931,57 +2063,72 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_app_icon())
         self.setAcceptDrops(True)
+        self.worker = None
+        self.job_ctx = None
+
+        self.home = ui.StartScreen(
+            "Open, edit and fix your PDFs - all on this computer",
+            [("Add files", "new", self.open_dialog, True), ("Add folder", "open", self.add_folder, False)],
+            "or drop PDF files here", recent_pdfs, self.open_path)
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
-        self.home = HomePage()
-        self.tabs.addTab(self.home, "Start")
-        self.tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)
-        self.tabs.tabBar().setTabButton(0, QTabBar.LeftSide, None)
+        self.tabs.setStyleSheet("QTabWidget::pane{border:none;} QTabBar{background:#F7F4FB;}"
+                                "QTabBar::tab{padding:7px 12px; margin:6px 0 0 6px; border:1px solid transparent;"
+                                " border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px;"
+                                " color:#6B5F86; background:transparent;}"
+                                "QTabBar::tab:selected{background:white; border-color:#E7E1F0; color:#2A1241;}")
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self._tab_changed)
-        self.home.openPath.connect(self.open_path)
-        self.home.openDialog.connect(self.open_dialog)
-        self.home.createDialog.connect(self.create_dialog)
 
-        # right panel with the tools (about 1/10 of the window)
-        self.panel = QFrame()
-        self.panel.setObjectName("toolpanel")
-        self.panel.setStyleSheet("#toolpanel{background:#EDE6F4; border-left:1px solid #D0C4E1;}")
-        pl = QVBoxLayout(self.panel)
-        pl.setContentsMargins(8, 10, 8, 10)
-        pl.setSpacing(6)
-        head = QLabel("<b>Tools</b>")
-        head.setAlignment(Qt.AlignCenter)
-        pl.addWidget(head)
-        self.tool_btns = {}
-        for key, label, tip in TOOLS:
-            b = QPushButton(label)
-            b.setCheckable(True)
-            b.setToolTip(tip)
-            b.setMinimumHeight(40)
-            b.clicked.connect(lambda checked, k=key: self.pick_tool(k))
-            self.tool_btns[key] = b
-            pl.addWidget(b)
-        pl.addStretch()
-        self.panel.setEnabled(False)
+        self.batch = panel.BatchView()
+        self.batch.saveAll.connect(self.batch_save_all)
+        self.batch.stop.connect(self.stop_job)
+        self.batch.clear.connect(self.close_batch)
+        self.batch.addMore.connect(self.batch_add_more)
+
+        self.centre = QStackedWidget()
+        self.centre.addWidget(self.home)       # 0
+        self.centre.addWidget(self.tabs)       # 1
+        self.centre.addWidget(self.batch)      # 2
+
+        self.rail = ui.Rail(
+            [("new", "new", "New PDF from pictures, Word, Excel or text (Ctrl+N)", lambda: self.create_dialog()),
+             ("open", "open", "Open PDF (Ctrl+O)", self.open_dialog),
+             ("save", "save", "Save (Ctrl+S)", lambda: self._cur() and self._cur().save()),
+             ("export", "export", "Save as / export", self.export_menu_popup),
+             ("print", "print", "Print (Ctrl+P)", self.print_current),
+             None,
+             ("pen", "pen", "Add or edit text", lambda: self.tools.open_tool("text")),
+             ("pages", "pages", "Show or hide the page list", self.toggle_pages)],
+            [("settings", "settings", "Settings and help", self.settings_menu)])
+        self.rail.button("pages").setCheckable(True)
+
+        self.tools = panel.ToolsPanel()
+        self.tools.toolOpened.connect(self.tool_opened)
+        self.tools.toolClosed.connect(self.tool_closed)
+        self.tools.runClicked.connect(self.run_tool)
+        self.tools.stopClicked.connect(self.stop_job)
+        self.tools.previewClicked.connect(self.preview_tool)
 
         central = QWidget()
         cl = QVBoxLayout(central)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
-        cl.addWidget(ui.make_header(APP_NAME, "Create, shrink, organize, sign and edit PDFs", make_app_icon(), self.about))
+        cl.addWidget(ui.make_header(APP_NAME, "Create, organise, scan, convert, sign and protect PDFs",
+                                    make_app_icon(), self.about))
         body = QHBoxLayout()
         body.setSpacing(0)
-        body.addWidget(self.tabs, 1)
-        body.addWidget(self.panel)
+        body.addWidget(self.rail)
+        body.addWidget(self.centre, 1)
+        body.addWidget(self.tools)
         cl.addLayout(body, 1)
         self.setCentralWidget(central)
 
         self._menu()
-        self.resize(1250, 860)
+        self.resize(1280, 860)
         g = settings().value("geometry")
         if g:
             self.restoreGeometry(g)
@@ -1989,15 +2136,17 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_PageUp), self, activated=lambda: self._page_step(-1))
         self._tab_changed()
 
-        files = [f for f in files if os.path.isfile(f)]
+        files = [f for f in files if os.path.isfile(f) or os.path.isdir(f)]
         for f in files:
-            if f.lower().endswith(".pdf"):
+            if os.path.isdir(f):
+                self.add_folder(f)
+            elif f.lower().endswith(".pdf"):
                 self.open_path(f)
-        others = [f for f in files if not f.lower().endswith(".pdf") and conv.kind_of(f)]
+        others = [f for f in files if os.path.isfile(f) and not f.lower().endswith(".pdf") and conv.kind_of(f)]
         if others:
             QTimer.singleShot(0, lambda: self.create_dialog(others))
 
-    # ---- menu
+    # ---- menu (also gives the keyboard shortcuts)
     def _menu(self):
         mb = self.menuBar()
         fm = mb.addMenu("File")
@@ -2011,29 +2160,34 @@ class MainWindow(QMainWindow):
             return a
 
         act(fm, "Open PDF...", "Ctrl+O", self.open_dialog)
+        act(fm, "Open a folder (many PDFs at once)...", "Ctrl+Shift+O", self.add_folder)
         self.recent_menu = fm.addMenu("Open recent")
         self.recent_menu.aboutToShow.connect(self._fill_recent)
         act(fm, "Create PDF...", "Ctrl+N", lambda: self.create_dialog())
         fm.addSeparator()
         self.act_save = act(fm, "Save", "Ctrl+S", lambda: self._cur() and self._cur().save())
         self.act_saveas = act(fm, "Save as...", "Ctrl+Shift+S", lambda: self._cur() and self._cur().save(True))
-        self.export_menu = fm.addMenu("Export as")
-        self.act_exp_img = act(self.export_menu, "Pictures (PNG)...", None, lambda: self._cur() and self._cur().export_images())
-        self.act_exp_pages = act(self.export_menu, "Selected pages as a new PDF...", None,
-                                 lambda: self._cur() and self._cur().extract_pages())
         self.act_print = act(fm, "Print...", "Ctrl+P", self.print_current)
         act(fm, "Two sides on one page (ID card)...", None, self.two_sides)
         fm.addSeparator()
-        self.act_close = act(fm, "Close project", "Ctrl+W", lambda: self.close_tab(self.tabs.currentIndex()))
+        self.act_close = act(fm, "Close", "Ctrl+W", lambda: self.close_tab(self.tabs.currentIndex()))
         fm.addSeparator()
         act(fm, "Exit", "Ctrl+Q", self.close)
         act(fm, "Quit (force)", "Ctrl+Shift+Q", lambda: os._exit(0))
         em = mb.addMenu("Edit")
         self.act_undo = act(em, "Undo", "Ctrl+Z", lambda: self._cur() and self._cur().undo())
+        act(em, "Find a tool", "Ctrl+F", self._find_tool)
         vm = mb.addMenu("View")
+        act(vm, "Page list", "Ctrl+L", self.toggle_pages)
         act(vm, "Zoom in", "Ctrl++", lambda: self._cur() and self._cur().zoom_by(1.2))
         act(vm, "Zoom out", "Ctrl+-", lambda: self._cur() and self._cur().zoom_by(1 / 1.2))
         act(vm, "Fit width", "Ctrl+0", lambda: self._cur() and self._cur().fit_width())
+        act(vm, "Fit page", "Ctrl+9", lambda: self._cur() and self._cur().fit_page())
+
+    def _find_tool(self):
+        self.tools.back()
+        self.tools.search.setFocus()
+        self.tools.search.selectAll()
 
     def _fill_recent(self):
         self.recent_menu.clear()
@@ -2046,20 +2200,66 @@ class MainWindow(QMainWindow):
         if not items:
             self.recent_menu.addAction("(none)").setEnabled(False)
 
-    # ---- tabs
+    def export_menu_popup(self):
+        d = self._cur()
+        m = QMenu(self)
+        m.addAction("Save as …", lambda: d and d.save(True)).setEnabled(d is not None)
+        m.addSeparator()
+        for key in ("pdf2img", "pdf2word", "pdf2text", "extract"):
+            t = ops.TOOL[key]
+            a = m.addAction(ui.line_icon(t.symbol, 18, ui.ICON_INK), t.name + " …",
+                            lambda k=key: self.tools.open_tool(k))
+            a.setEnabled(d is not None or self.centre.currentIndex() == 2)
+        b = self.rail.button("export")
+        m.exec(b.mapToGlobal(b.rect().topRight()))
+
+    def settings_menu(self):
+        m = QMenu(self)
+        m.addAction("About Digonto PDF", self.about)
+        m.addAction("Keyboard shortcuts", lambda: ui.show_all_shortcuts(self, APP_NAME))
+        m.addSeparator()
+        m.addAction("Clear the recent files list", self._clear_recent)
+        m.addAction("Clear recent tools and favourites", self._clear_tools)
+        b = self.rail.button("settings")
+        m.exec(b.mapToGlobal(b.rect().topRight()))
+
+    def _clear_recent(self):
+        settings().setValue("recent_pdfs", [])
+        self.home.refresh()
+
+    def _clear_tools(self):
+        panel.settings().setValue("tools/recent", [])
+        panel.settings().setValue("tools/fav", [])
+        self.tools.fill()
+
+    # ---- what is shown
     def _cur(self):
+        if self.centre.currentIndex() != 1:
+            return None
         w = self.tabs.currentWidget()
         return w if isinstance(w, DocTab) else None
 
+    def _show_centre(self):
+        if self.centre.currentIndex() == 2 and self.batch.files:
+            pass
+        elif self.tabs.count():
+            self.centre.setCurrentIndex(1)
+        else:
+            self.centre.setCurrentIndex(0)
+            self.home.refresh()
+        self._tab_changed()
+
     def _tab_changed(self, *_):
         d = self._cur()
-        self.panel.setEnabled(d is not None)
-        for k, b in self.tool_btns.items():
-            b.setChecked(d is not None and d.tool == k)
-        for a in (self.act_save, self.act_saveas, self.act_close, self.act_undo, self.act_exp_img, self.act_exp_pages):
+        batch = len(self.batch.files) if self.centre.currentIndex() == 2 else 0
+        for a in (self.act_save, self.act_saveas, self.act_close, self.act_undo, self.act_print):
             a.setEnabled(d is not None)
-        self.export_menu.setEnabled(d is not None)
-        self.act_close.setEnabled(d is not None)
+        self.rail.set_enabled(["save", "print", "pen", "pages"], d is not None)
+        self.rail.set_enabled(["export"], d is not None or batch > 0)
+        self.rail.button("pages").setChecked(bool(d and d.pages_box.isVisible()))
+        self.tools.set_context(d is not None, batch, len(d.selected_pages()) if d else 0)
+        if d is not None and self.tools.current in UI_TOOL and d.tool != UI_TOOL[self.tools.current]:
+            self.tool_opened(self.tools.current)
         self.setWindowTitle(f"{d.name} - {APP_NAME}" if d else APP_NAME)
 
     def _title_changed(self):
@@ -2071,27 +2271,383 @@ class MainWindow(QMainWindow):
         d = self._cur()
         if d:
             self.setWindowTitle(f"{d.name} - {APP_NAME}")
+            self.tools.context["selected"] = len(d.selected_pages())
 
-    def pick_tool(self, key):
+    def toggle_pages(self):
         d = self._cur()
-        if d is None:
-            return
-        d.set_tool(None if d.tool == key else key)
-        for k, b in self.tool_btns.items():
-            b.setChecked(d.tool == k)
+        if d:
+            self.rail.button("pages").setChecked(d.toggle_pages())
 
     def _page_step(self, s):
         d = self._cur()
         if d:
             d.goto(d.cur + s)
 
+    # ---- tools
+    def tool_opened(self, key):
+        t = ops.TOOL[key]
+        d = self._cur()
+        if t.kind == "ui" and d is not None:
+            d.set_tool(UI_TOOL[key], self.tools.ui_box)
+            self.rail.button("pages").setChecked(d.pages_box.isVisible())
+        elif key == "info" and d is not None:
+            self._info_fields(d)
+        elif key == "unlock" and d is not None:
+            has = bool(d.password)
+            lab = QLabel("This PDF has a password. Press the button, then save." if has
+                         else "This PDF has no password.")
+            lab.setWordWrap(True)
+            self.tools.ui_box.addWidget(lab)
+            self.tools.run_btn.setEnabled(has)
+
+    def tool_closed(self, key):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, DocTab) and w.tool is not None:
+                w.set_tool(None)
+            if isinstance(w, DocTab):
+                w.close_preview()
+
+    def _info_fields(self, d):
+        m = d.doc.metadata or {}
+        size = human(os.path.getsize(d.path)) if d.path and os.path.exists(d.path) else "not saved yet"
+        facts = QLabel(f"<b>Pages:</b> {d.count()}<br><b>Size:</b> {size}<br><b>Made with:</b> "
+                       f"{(m.get('producer') or '-')[:40]}<br><b>Password:</b> {'yes' if d.password else 'no'}")
+        facts.setWordWrap(True)
+        self.tools.ui_box.addWidget(facts)
+        self._info_edits = {}
+        for key, label in (("title", "Title"), ("author", "Author"), ("subject", "Subject"), ("keywords", "Keywords")):
+            lab = QLabel(label)
+            lab.setObjectName("dgField")
+            e = QLineEdit(m.get(key) or "")
+            self.tools.ui_box.addWidget(lab)
+            self.tools.ui_box.addWidget(e)
+            self._info_edits[key] = e
+
+    def preview_tool(self, key, opts):
+        d = self._cur()
+        if d is None:
+            if self.centre.currentIndex() == 2:
+                self.tools.show_result("Open one of the files to see a preview.", True)
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            d.apply_pending()
+            before, after, note = panel.preview_images(key, d.doc, d.cur, opts)
+            d.show_preview(before, after, note)
+        except Exception as e:                                  # noqa: BLE001
+            self.tools.show_result(str(e), True)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def run_tool(self, key, opts):
+        t = ops.TOOL[key]
+        if self.worker is not None:
+            return
+        if t.kind in ("action", "ui"):
+            return self.run_action(key, opts)
+        batch = self.centre.currentIndex() == 2 and self.batch.files
+        if batch:
+            jobs = []
+            for f in self.batch.files:
+                try:
+                    with open(f["path"], "rb") as fh:
+                        data = fh.read()
+                except OSError as e:
+                    f["err"] = str(e)
+                    continue
+                jobs.append(dict(data=data, base=os.path.splitext(f["name"])[0], password=None))
+            self.batch.reset_results()
+            self.job_ctx = ("batch", t, opts)
+        else:
+            d = self._cur()
+            if d is None:
+                return
+            d.apply_pending()
+            opts = dict(opts, _selected=d.selected_pages())
+            jobs = [dict(data=d.doc.tobytes(), base=os.path.splitext(d.name)[0])]
+            self.job_ctx = ("doc", t, opts, d)
+        self.worker = panel.JobWorker(t, opts, jobs)
+        self.worker.progress.connect(self._job_progress)
+        self.worker.jobDone.connect(self._job_done)
+        self.worker.allDone.connect(self._all_done)
+        self.tools.busy(True)
+        if batch:
+            self.batch.busy(True)
+        self.worker.start()
+
+    def _job_progress(self, k, frac, text):
+        if self.job_ctx[0] == "batch":
+            n = len(self.batch.files)
+            self.batch.progress(k, frac)
+            self.tools.show_progress((k + frac) / max(n, 1), f"File {k + 1} of {n}  {text}")
+        else:
+            self.tools.show_progress(frac, text)
+
+    def _job_done(self, k, result, msg, err):
+        if self.job_ctx[0] == "batch":
+            self.batch.job_done(k, result, msg, err)
+            return
+        _, t, opts, d = self.job_ctx
+        if err:
+            self.tools.show_result(err, True)
+            return
+        if t.kind == "files":
+            self._save_files(result, d)
+            return
+        if result is None:
+            self.tools.show_result(msg)
+            return
+        d.push_undo()
+        d.doc = fitz.open(stream=result, filetype="pdf")
+        d.rebuild(keep=True)
+        d.close_preview()
+        extra = ""
+        if t.key == "compress" and d.path and os.path.exists(d.path):
+            extra = "  - press Save to keep it"
+        self.tools.show_result(msg + extra)
+
+    def _all_done(self, stopped):
+        kind = self.job_ctx[0] if self.job_ctx else None
+        self.worker.wait()
+        self.worker = None
+        self.tools.busy(False)
+        if kind == "batch":
+            self.batch.busy(False)
+            ok = sum(1 for f in self.batch.files if f["result"])
+            bad = sum(1 for f in self.batch.files if f["err"])
+            text = f"Done: {ok} file(s) ready" + (f", {bad} with a problem" if bad else "") + " - press Save all."
+            self.tools.show_result("Stopped. " + text if stopped else text, bad > 0 and ok == 0)
+        elif stopped:
+            self.tools.show_result("Stopped - nothing was changed.")
+        self.job_ctx = None
+
+    def stop_job(self):
+        if self.worker is not None:
+            self.worker.stop()
+
+    def _save_files(self, files, d):
+        if not files:
+            self.tools.show_result("Nothing to save.")
+            return
+        if len(files) == 1:
+            name, data = files[0]
+            ext = os.path.splitext(name)[1]
+            p, _ = QFileDialog.getSaveFileName(self, "Save as", os.path.join(last_dir(), name), f"*{ext}")
+            if not p:
+                return
+            if not p.lower().endswith(ext.lower()):
+                p += ext
+            with open(p, "wb") as f:
+                f.write(data)
+            remember_dir(p)
+            self.tools.show_result(f"Saved: {os.path.basename(p)}")
+            self._offer_open(p)
+            return
+        folder = QFileDialog.getExistingDirectory(self, f"Choose a folder for the {len(files)} files", last_dir())
+        if not folder:
+            return
+        remember_dir(folder)
+        for name, data in files:
+            with open(unique_path(os.path.join(folder, name)), "wb") as f:
+                f.write(data)
+        self.tools.show_result(f"Saved {len(files)} files in {os.path.basename(folder) or folder}")
+        ui.open_external(folder)
+
+    def _offer_open(self, path):
+        if path.lower().endswith(".pdf"):
+            self.open_path(path)
+        else:
+            ui.open_external(os.path.dirname(path))
+
+    # ---- tools that need a dialog
+    def run_action(self, key, opts):
+        d = self._cur()
+        if key == "merge":
+            return self.merge(d)
+        if key == "img2pdf":
+            return self.create_dialog()
+        if key == "redact":                                      # the "black out words" button
+            batch = self.centre.currentIndex() == 2
+            if batch or d is not None:
+                return self.run_tool_doc("redact", opts)
+            return
+        if key == "compare" and d is not None:
+            return self.compare(d)
+        if key == "info" and d is not None:
+            d.push_undo()
+            ops.op_info(d.doc, {k: e.text() for k, e in self._info_edits.items()})
+            return self.tools.show_result("Saved in the document - press Save to keep it.")
+        if key == "lock":
+            pw, pw2 = opts.get("pw", ""), opts.get("pw2", "")
+            if not pw:
+                return self.tools.show_result("Type a password.", True)
+            if pw != pw2:
+                return self.tools.show_result("The two passwords are not the same.", True)
+            if self.centre.currentIndex() == 2:
+                return self._batch_lock(pw)
+            if d is not None:
+                d.password = pw
+                d.set_modified(True)
+                return self.tools.show_result("The password is set when you save. Don't forget it - "
+                                              "nobody can open the PDF without it.")
+        if key == "unlock":
+            if self.centre.currentIndex() == 2:
+                return self._batch_lock(None)
+            if d is not None and d.password:
+                d.password = None
+                d.set_modified(True)
+                return self.tools.show_result("Password removed - press Save to keep it.")
+
+    def run_tool_doc(self, key, opts):
+        """run a 'ui' tool's button through the normal background worker (redact words)"""
+        t = ops.TOOL[key]
+        fake = ops.Tool(t.key, t.name, t.group, t.symbol, t.tip, "doc", t.fields, t.run, t.button)
+        saved = ops.TOOL[key]
+        ops.TOOL[key] = fake
+        try:
+            self.run_tool(key, opts)
+        finally:
+            ops.TOOL[key] = saved
+
+    def _batch_lock(self, pw):
+        for f in self.batch.files:
+            try:
+                doc = fitz.open(f["path"])
+                if doc.needs_pass:
+                    f.update(result=None, err="has a password - open it on its own")
+                    continue
+                kw = dict(encryption=fitz.PDF_ENCRYPT_AES_256, user_pw=pw, owner_pw=pw) if pw else {}
+                f.update(result=doc.tobytes(garbage=3, deflate=True, **kw), msg="", err="")
+            except Exception as e:                                # noqa: BLE001
+                f.update(result=None, err=str(e))
+        self.batch._rebuild()
+        self.tools.show_result("Ready - press Save all.")
+
+    def merge(self, d):
+        if self.centre.currentIndex() == 2 and self.batch.files:
+            paths = [f["path"] for f in self.batch.files]
+        else:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Choose the PDFs to put together (in this order)",
+                                                    last_dir(), PDF_FILTER)
+            if not paths:
+                return
+        out = fitz.open()
+        if d is not None and self.centre.currentIndex() == 1:
+            d.apply_pending()
+            out.insert_pdf(d.doc)
+        bad = []
+        for p in paths:
+            src = open_pdf(self, p)
+            if src is None:
+                bad.append(os.path.basename(p))
+                continue
+            out.insert_pdf(src)
+        if out.page_count == 0:
+            return
+        self.add_doc(out, None, "Merged.pdf", True)
+        self.tools.show_result(f"Merged into a new PDF with {out.page_count} pages - press Save to keep it."
+                               + (f"  Skipped: {', '.join(bad)}" if bad else ""))
+
+    def compare(self, d):
+        p, _ = QFileDialog.getOpenFileName(self, "Compare with which PDF?", last_dir(), PDF_FILTER)
+        if not p:
+            return
+        other = open_pdf(self, p)
+        if other is None:
+            return
+        n, html = ops.compare_html(d.doc, other, d.name, os.path.basename(p))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Compare - {d.name} / {os.path.basename(p)}")
+        dlg.resize(980, 700)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel(f"<b>{n} page(s) with changes.</b>  Red: only in {d.name}   Green: only in "
+                           f"{os.path.basename(p)}" if n else ""))
+        from PySide6.QtWidgets import QTextBrowser
+        tb = QTextBrowser()
+        tb.setHtml(html)
+        v.addWidget(tb, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        dlg.exec()
+
+    # ---- batch (many files)
+    def add_folder(self, folder=None):
+        if not folder:
+            folder = QFileDialog.getExistingDirectory(self, "Choose a folder with PDF files", last_dir())
+            if not folder:
+                return
+        remember_dir(os.path.join(folder, "x"))
+        paths = sorted(glob.glob(os.path.join(folder, "*.pdf")) + glob.glob(os.path.join(folder, "*.PDF")))
+        paths = sorted(set(paths), key=lambda p: os.path.basename(p).lower())
+        if not paths:
+            QMessageBox.information(self, APP_NAME, "There are no PDF files in this folder.")
+            return
+        self.open_batch(paths, os.path.basename(folder.rstrip("/\\")) or folder)
+
+    def open_batch(self, paths, name=""):
+        self.batch.set_files(paths, name)
+        self.centre.setCurrentIndex(2)
+        self._tab_changed()
+
+    def batch_add_more(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Add PDFs to the list", last_dir(), PDF_FILTER)
+        if files:
+            self.batch.set_files(files)
+            self._tab_changed()
+
+    def close_batch(self):
+        if self.worker is not None:
+            return
+        if any(f["result"] for f in self.batch.files):
+            r = QMessageBox.question(self, APP_NAME, "Close the list without saving the results?")
+            if r != QMessageBox.Yes:
+                return
+        self.batch.files = []
+        self.batch._rebuild()
+        self.centre.setCurrentIndex(1 if self.tabs.count() else 0)
+        self._show_centre()
+
+    def batch_save_all(self):
+        ready = [f for f in self.batch.files if f["result"]]
+        if not ready:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Save the results in which folder?", last_dir())
+        if not folder:
+            return
+        n = 0
+        for f in ready:
+            if isinstance(f["result"], list):
+                for name, data in f["result"]:
+                    with open(unique_path(os.path.join(folder, name)), "wb") as fh:
+                        fh.write(data)
+                    n += 1
+            else:
+                target = os.path.join(folder, f["name"])
+                if os.path.abspath(target) == os.path.abspath(f["path"]):
+                    target = unique_path(os.path.join(folder, os.path.splitext(f["name"])[0] + " - Digonto.pdf"))
+                else:
+                    target = unique_path(target)
+                with open(target, "wb") as fh:
+                    fh.write(f["result"])
+                n += 1
+        remember_dir(os.path.join(folder, "x"))
+        self.tools.show_result(f"Saved {n} file(s) in {os.path.basename(folder) or folder}.")
+        ui.open_external(folder)
+
+    # ---- documents
     def add_doc(self, doc, path=None, name=None, modified=False):
         d = DocTab(doc, path, name, modified)
+        d.password = getattr(doc, "_dg_pw", None)
         d.changed.connect(self._title_changed)
         d.openBytes.connect(lambda data, nm: self.add_doc(fitz.open(stream=data, filetype="pdf"), None, nm, True))
+        d.thumbs.itemSelectionChanged.connect(self._title_changed)
         i = self.tabs.addTab(d, d.title())
         self.tabs.setTabToolTip(i, path or "not saved yet")
+        self.centre.setCurrentIndex(1)
         self.tabs.setCurrentIndex(i)
+        self._tab_changed()
         return d
 
     def open_path(self, path):
@@ -2099,6 +2655,7 @@ class MainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, DocTab) and w.path and os.path.abspath(w.path) == path:
+                self.centre.setCurrentIndex(1)
                 self.tabs.setCurrentIndex(i)
                 return
         doc = open_pdf(self, path)
@@ -2135,6 +2692,7 @@ class MainWindow(QMainWindow):
         w = self._cur()
         if w is None:
             return
+        w.apply_pending()
         doc = w.doc
         zoom = 300 / 72.0
 
@@ -2142,52 +2700,65 @@ class MainWindow(QMainWindow):
             pix = doc[i].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
             img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
             p.drawImage(ui.fit_rect(img.width(), img.height(), rect), img)
-        ui.print_pages(self, doc.page_count, page, os.path.basename(w.path) if getattr(w, "path", None) else "Digonto PDF")
+        ui.print_pages(self, doc.page_count, page, w.name)
 
     def close_tab(self, i):
         w = self.tabs.widget(i)
         if not isinstance(w, DocTab):
             return
+        if self.worker is not None and self.job_ctx and self.job_ctx[0] == "doc" and self.job_ctx[3] is w:
+            return
         if not w.maybe_close():
             return
         self.tabs.removeTab(i)
         w.deleteLater()
-        self.home.refresh()
+        self._show_centre()
 
     # ---- window
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self.panel.setFixedWidth(max(112, min(200, self.width() // 10)))
-
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
+            if self.centre.currentIndex() == 0:
+                self.home.set_dropping(True)
+
+    def dragLeaveEvent(self, e):
+        self.home.set_dropping(False)
 
     def dropEvent(self, e):
+        self.home.set_dropping(False)
         files = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        others = []
-        for f in files:
-            if f.lower().endswith(".pdf"):
+        folders = [f for f in files if os.path.isdir(f)]
+        pdfs = [f for f in files if f.lower().endswith(".pdf") and os.path.isfile(f)]
+        others = [f for f in files if os.path.isfile(f) and not f.lower().endswith(".pdf") and conv.kind_of(f)]
+        for f in folders:
+            self.add_folder(f)
+        if self.centre.currentIndex() == 2 and pdfs:
+            self.batch.set_files(pdfs)
+            self._tab_changed()
+        else:
+            for f in pdfs:
                 self.open_path(f)
-            elif conv.kind_of(f) or os.path.isdir(f):
-                others.append(f)
         if others:
             self.create_dialog(others)
 
     def about(self):
-        QMessageBox.about(
-            self, f"About {APP_NAME}",
-            f"<h3>{APP_NAME} {APP_VERSION}</h3>"
-            "<p>Create, shrink, organize, sign and edit PDF files on Ubuntu, macOS and Windows.</p>"
-            "<p>Built with only two libraries (exact versions, checked with SHA-256 when installed):<br>"
-            f"&bull; Qt for Python (PySide6-Essentials)<br>&bull; PyMuPDF {fitz.VersionBind}</p>"
-            "<p>Word, Excel, text and picture conversion is Digonto's own code.<br>"
-            "Digonto PDF never connects to the internet. Your files stay on your computer.</p>")
+        ui.about_dialog(
+            self, APP_NAME,
+            f"<p><b>{APP_NAME} {APP_VERSION}</b></p>"
+            "<p>Open, organise, clean up, OCR, convert, sign and protect PDF files on Ubuntu, macOS and Windows.</p>"
+            f"<p>Made with Qt for Python (PySide6) and PyMuPDF {fitz.VersionBind}. Text recognition (OCR) uses the "
+            "Tesseract engine inside PyMuPDF with English, German, Italian and Bengali language files.</p>"
+            "<p>Digonto PDF never connects to the internet. Your files stay on your computer.</p>",
+            make_app_icon())
 
     def closeEvent(self, e):
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker.wait(3000)
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, DocTab):
+                self.centre.setCurrentIndex(1)
                 self.tabs.setCurrentIndex(i)
                 if not w.maybe_close():
                     e.ignore()
