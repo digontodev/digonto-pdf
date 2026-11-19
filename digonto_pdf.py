@@ -2452,13 +2452,13 @@ class MainWindow(QMainWindow):
             with open(unique_path(os.path.join(folder, name)), "wb") as f:
                 f.write(data)
         self.tools.show_result(f"Saved {len(files)} files in {os.path.basename(folder) or folder}")
-        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        ui.open_external(folder)
 
     def _offer_open(self, path):
         if path.lower().endswith(".pdf"):
             self.open_path(path)
         else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+            ui.open_external(os.path.dirname(path))
 
     # ---- tools that need a dialog
     def run_action(self, key, opts):
@@ -2634,7 +2634,7 @@ class MainWindow(QMainWindow):
                 n += 1
         remember_dir(os.path.join(folder, "x"))
         self.tools.show_result(f"Saved {n} file(s) in {os.path.basename(folder) or folder}.")
-        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        ui.open_external(folder)
 
     # ---- documents
     def add_doc(self, doc, path=None, name=None, modified=False):
