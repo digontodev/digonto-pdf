@@ -9,6 +9,7 @@
     "pdf_ops.py",
     "pdf_panel.py",
     "pdf_scan.py",
+    "pdf_safe.py",
     "digonto_convert.py",
     "digonto_ui.py",
     "digonto_sides.py",
