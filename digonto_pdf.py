@@ -31,6 +31,7 @@ import digonto_convert as conv
 import digonto_ui as ui
 import pdf_ops as ops
 import pdf_panel as panel
+import pdf_safe
 from PySide6.QtCore import (QByteArray, QBuffer, QIODevice, QItemSelectionModel, QPointF, QRect, QTimer, QUrl,
                             QRectF, QSettings, QSize, QStandardPaths, Qt,
                             QThread, Signal)
@@ -136,7 +137,13 @@ def save_doc(parent, doc, path, **kw):
     fd, tmp = tempfile.mkstemp(suffix=".pdf", dir=folder)
     os.close(fd)
     try:
-        doc.save(tmp, garbage=3, deflate=True, **kw)
+        if doc.is_encrypted:
+            doc.save(tmp, garbage=3, deflate=True, **kw)
+        else:
+            copy = fitz.open(stream=doc.tobytes(), filetype="pdf")    # a copy: the open document keeps its full fonts
+            pdf_safe.finish(copy)                                      # only the letters used go into the file
+            copy.save(tmp, garbage=3, deflate=True, **kw)
+            copy.close()
         os.replace(tmp, path)
     except Exception as e:
         try:
@@ -833,11 +840,7 @@ def place_image_on_page(page, rect_displayed, png):
     """rect_displayed is in the coordinates of the page as you see it
     (rotation applied). Converts to PDF coordinates and inserts the image
     upright."""
-    r = fitz.Rect(rect_displayed.x(), rect_displayed.y(),
-                  rect_displayed.x() + rect_displayed.width(), rect_displayed.y() + rect_displayed.height())
-    r = r * page.derotation_matrix
-    page.insert_image(r, stream=png, rotate=page.rotation,
-                      keep_proportion=False, overlay=True)
+    pdf_safe.place_signature(page, (rect_displayed.x(), rect_displayed.y(), rect_displayed.width(), rect_displayed.height()), png)
 
 
 
@@ -922,7 +925,7 @@ def redact_text(page, rect_unrot, fill=False):
 def insert_text_upright(page, point_displayed, v):
     """Insert text so it reads normally on the page as displayed."""
     p = fitz.Point(point_displayed.x(), point_displayed.y()) * page.derotation_matrix
-    page.insert_text(p, v["text"], fontsize=v["size"], fontname=v["fontname"], color=v["color"],
+    page.insert_text(p, v["text"], fontsize=v["size"], **pdf_safe.font_kw(v["fontname"]), color=v["color"],
                      rotate=page.rotation)
 
 
@@ -1441,12 +1444,24 @@ class DocTab(QWidget):
         self.strip_lay.addWidget(lb)
         return lb
 
+    @staticmethod
+    def _clear_layout(lay):
+        while lay is not None and lay.count():
+            item = lay.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+                item.widget().deleteLater()
+            elif item.layout() is not None:
+                DocTab._clear_layout(item.layout())
+
     def set_tool(self, name, layout=None):
         """name: pages | sign | edit | redact | None.  The controls go into `layout` (the tools panel)."""
+        prev, self.tool = self.tool, name          # set first: saving below must not open the tool a second time
         self.apply_pending()
         if layout is not None:
             self.strip_lay = layout
-        self.tool = name
+        if name is not None and getattr(self, "strip_lay", None) is not None:
+            self._clear_layout(self.strip_lay)      # never two sets of buttons in the panel
         self.view.mode = None
         self.view.unsetCursor()
         self.clear_hl()
@@ -1659,7 +1674,7 @@ class DocTab(QWidget):
             txt = {"1": f"{i + 1}", "Page 1": f"Page {i + 1}", "1 / N": f"{i + 1} / {n}",
                    "Page 1 of N": f"Page {i + 1} of {n}"}[fmt]
             r = p.rect
-            w = fitz.get_text_length(txt, fontname="helv", fontsize=10)
+            w = pdf_safe.text_length(txt, "helv", 10)
             x = {"centre": (r.width - w) / 2, "right": r.width - w - 36, "left": 36}[pos.split()[1]]
             y = r.height - 24 if pos.startswith("Bottom") else 36
             insert_text_upright(p, QPointF(x, y), dict(text=txt, size=10.0, fontname="helv", color=(0.2, 0.2, 0.2)))
@@ -1675,10 +1690,10 @@ class DocTab(QWidget):
         for p in self.doc:
             r = p.rect
             size = min(r.width, r.height) / max(len(txt), 3) * 1.5
-            w = fitz.get_text_length(txt, fontname="hebo", fontsize=size)
+            w = pdf_safe.text_length(txt, "hebo", size)
             c = fitz.Point(r.width / 2, r.height / 2)
             start = fitz.Point(c.x - w / 2, c.y + size / 3)
-            p.insert_text(start * p.derotation_matrix, txt, fontsize=size, fontname="hebo", color=(0.6, 0.6, 0.6),
+            p.insert_text(start * p.derotation_matrix, txt, fontsize=size, **pdf_safe.font_kw("hebo"), color=(0.6, 0.6, 0.6),
                           fill_opacity=0.35, morph=(c * p.derotation_matrix, fitz.Matrix(45)), overlay=True)
         self.set_modified(True)
         self.show_current()
@@ -1814,10 +1829,13 @@ class DocTab(QWidget):
         c = self.view.mapToScene(self.view.viewport().rect().center())
         sig.setPos(min(max(0, c.x() - sig.w / 2), page.rect.width - sig.w),
                    min(max(0, c.y() - sig.h / 2), page.rect.height - sig.h))
+        n = len(self.pending.get(self.cur, []))
+        sig.moveBy(12 * (n % 5), 12 * (n % 5))      # each new one a little lower right, so it is not hidden under the last
         sc = self.view.scene()
         sc.addItem(sig)
         sc.clearSelection()
         sig.setSelected(True)
+        self.view.ensureVisible(sig)
         self.pending.setdefault(self.cur, []).append(sig)
         self.set_modified(True)
 
@@ -1966,7 +1984,7 @@ class DocTab(QWidget):
         if v["text"].strip():
             angle = int(round(math.degrees(math.atan2(-dy, dx)) / 90.0)) * 90 % 360
             page.insert_text(fitz.Point(s0["origin"]), v["text"], fontsize=v["size"],
-                             fontname=v["fontname"], color=v["color"], rotate=angle)
+                             **pdf_safe.font_kw(v["fontname"]), color=v["color"], rotate=angle)
         self._edited()
 
     def on_rect(self, r):
@@ -2015,6 +2033,47 @@ class DocTab(QWidget):
         self.name = os.path.basename(path)
         add_recent_pdf(path)
         self.set_modified(False)
+        return True
+
+    def save_for_upload(self):
+        """a copy that government upload portals accept (they turn every upload into PDF/A)"""
+        self.apply_pending()
+        box = QMessageBox(QMessageBox.Question, APP_NAME,
+                          "Save a copy for uploading to an office website (Arbeitsagentur, Finanzamt, Jobcenter …)?\n\n"
+                          "Form fields and notes become part of the page, scripts, attachments and bookmarks are "
+                          "removed, and any page that could still be refused is turned into a clean picture.", parent=self)
+        normal = box.addButton("Save copy", QMessageBox.AcceptRole)
+        pic = box.addButton("All pages as pictures (always accepted)", QMessageBox.ActionRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(normal)
+        box.exec()
+        if box.clickedButton() not in (normal, pic):
+            return False
+        base = os.path.splitext(self.name)[0]
+        start = os.path.join(os.path.dirname(self.path) if self.path else last_dir(), base + " (upload).pdf")
+        p, _ = QFileDialog.getSaveFileName(self, "Save copy for upload", start, PDF_FILTER)
+        if not p:
+            return False
+        p = ensure_pdf_ext(p)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data, pics = pdf_safe.upload_copy(self.doc.tobytes(), as_picture=box.clickedButton() is pic, password=self.password)
+            with open(p, "wb") as fh:
+                fh.write(data)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, APP_NAME, f"Could not make the upload copy:\n{e}")
+            return False
+        QApplication.restoreOverrideCursor()
+        remember_dir(p)
+        add_recent_pdf(p)
+        size = os.path.getsize(p)
+        note = ""
+        if pics and box.clickedButton() is not pic:
+            note = f"\n\nPage(s) {', '.join(map(str, pics))} had something offices refuse, so they are now pictures."
+        if size > 9 * 1024 * 1024:
+            note += "\n\nThe file is larger than 9 MB, which many office websites refuse: use Compress first."
+        QMessageBox.information(self, APP_NAME, f"Saved for upload:\n{p}\n({human(size)}){note}")
         return True
 
     def maybe_close(self):
@@ -2167,6 +2226,8 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self.act_save = act(fm, "Save", "Ctrl+S", lambda: self._cur() and self._cur().save())
         self.act_saveas = act(fm, "Save as...", "Ctrl+Shift+S", lambda: self._cur() and self._cur().save(True))
+        self.act_upload = act(fm, "Save for upload (Arbeitsagentur, Finanzamt …)…", "Ctrl+Alt+S",
+                              lambda: self._cur() and self._cur().save_for_upload())
         self.act_print = act(fm, "Print...", "Ctrl+P", self.print_current)
         act(fm, "Two sides on one page (ID card)...", None, self.two_sides)
         fm.addSeparator()
@@ -2204,6 +2265,7 @@ class MainWindow(QMainWindow):
         d = self._cur()
         m = QMenu(self)
         m.addAction("Save as …", lambda: d and d.save(True)).setEnabled(d is not None)
+        m.addAction("Save for upload (Arbeitsagentur, Finanzamt …) …", lambda: d and d.save_for_upload()).setEnabled(d is not None)
         m.addSeparator()
         for key in ("pdf2img", "pdf2word", "pdf2text", "extract"):
             t = ops.TOOL[key]
@@ -2252,7 +2314,7 @@ class MainWindow(QMainWindow):
     def _tab_changed(self, *_):
         d = self._cur()
         batch = len(self.batch.files) if self.centre.currentIndex() == 2 else 0
-        for a in (self.act_save, self.act_saveas, self.act_close, self.act_undo, self.act_print):
+        for a in (self.act_save, self.act_saveas, self.act_upload, self.act_close, self.act_undo, self.act_print):
             a.setEnabled(d is not None)
         self.rail.set_enabled(["save", "print", "pen", "pages"], d is not None)
         self.rail.set_enabled(["export"], d is not None or batch > 0)
