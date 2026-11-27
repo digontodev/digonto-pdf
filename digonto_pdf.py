@@ -1997,7 +1997,9 @@ class DocTab(QWidget):
         else:
             wd = unrot.width
             r = fitz.Rect(unrot.x0 + wd * 0.15, unrot.y0 - 0.5, unrot.x1 - wd * 0.15, unrot.y1 + 0.5)
-        redact_text(page, r)
+        picture = pdf_safe.is_picture_page(page)
+        # on a picture page the old words are pixels of the picture: cover them with white, then write the new text
+        redact_text(page, r, fill=(1, 1, 1) if picture else False)
         if v["text"].strip():
             angle = int(round(math.degrees(math.atan2(-dy, dx)) / 90.0)) * 90 % 360
             page.insert_text(fitz.Point(s0["origin"]), v["text"], fontsize=v["size"],

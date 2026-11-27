@@ -32,6 +32,9 @@ _FONTS = {
     "cobo": ("DgMonoBold", "FiraMono-Bold.ttf"),
 }
 _cache = {}
+# a new resource name every run: a saved file holds a trimmed copy of the font (only the letters used) under the
+# name of that run; reusing such a copy for new text would show empty boxes for letters it does not have
+_RUN = f"{os.getpid() % 100000:05d}{int.from_bytes(os.urandom(2), 'big') % 1000:03d}"
 
 
 def font_kw(name):
@@ -39,8 +42,21 @@ def font_kw(name):
     nm, fn = _FONTS.get(name, (None, None))
     path = os.path.join(FONT_DIR, fn) if fn else None
     if path and os.path.exists(path):
-        return {"fontname": nm, "fontfile": path}
+        return {"fontname": nm + _RUN, "fontfile": path}
     return {"fontname": name}
+
+
+def is_picture_page(page):
+    """a page that is one big picture with invisible text on top (a scan with OCR, or a page Save for upload made)"""
+    try:
+        imgs = page.get_image_info()
+        area = abs(page.rect)
+        if not any(abs(fitz.Rect(i["bbox"]) & page.rect) > 0.9 * area for i in imgs):
+            return False
+        spans = page.get_texttrace()
+        return bool(spans) and all(sp.get("type") == 3 for sp in spans)
+    except Exception:
+        return False
 
 
 def _font(name):
