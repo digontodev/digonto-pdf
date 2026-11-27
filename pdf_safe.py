@@ -62,37 +62,52 @@ def finish(doc):
 
 
 # ---------------------------------------------------------------- signatures
+def _stencil_page(ink, rgb, w_pt, h_pt):
+    """a one-page PDF holding the signature as a 1-bit stencil image (an /ImageMask) painted in its ink colour:
+    one small image, no see-through picture, allowed in every PDF/A level"""
+    rows, cols = ink.shape
+    tmp = fitz.open()
+    tp = tmp.new_page(width=w_pt, height=h_pt)
+    x = tmp.get_new_xref()
+    tmp.update_object(x, f"<< /Type /XObject /Subtype /Image /Width {cols} /Height {rows} /ImageMask true /BitsPerComponent 1 >>")
+    tmp.update_stream(x, np.packbits(~ink, axis=1).tobytes())          # 0 = ink, 1 = leave the page as it is
+    tmp.xref_set_key(tp.xref, "Resources", f"<< /XObject << /Sig {x} 0 R >> >>")
+    c = tmp.get_new_xref()
+    tmp.update_object(c, "<< >>")
+    tmp.update_stream(c, f"q {rgb[0]:.4f} {rgb[1]:.4f} {rgb[2]:.4f} rg {w_pt:.4f} 0 0 {h_pt:.4f} 0 0 cm /Sig Do Q".encode())
+    tmp.xref_set_key(tp.xref, "Contents", f"{c} 0 R")
+    return tmp
+
+
 def place_signature(page, rect_displayed, png):
     """rect_displayed: (x, y, w, h) in page coordinates as you see the page (rotation applied).
-    A signature with a see-through background is drawn as solid ink (vector shapes), which every
-    office system accepts; a picture without see-through parts is placed as it is."""
+    A signature with a see-through background becomes one small stencil image in its ink colour, which office
+    systems accept; a picture without see-through parts is placed as it is."""
     x, y, w, h = rect_displayed
     pix = fitz.Pixmap(png)
+    r = fitz.Rect(x, y, x + w, y + h) * page.derotation_matrix
     if not pix.alpha:
-        r = fitz.Rect(x, y, x + w, y + h) * page.derotation_matrix
         page.insert_image(r, stream=png, rotate=page.rotation, keep_proportion=False, overlay=True)
         return
     a = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
-    # about 4 dots per point (~290 dpi) is plenty for a signature, and keeps the file small
-    step = max(1, int(min(pix.width / max(w * 4, 1), pix.height / max(h * 4, 1))))
+    # about 5 dots per point (~360 dpi) is plenty for a signature
+    step = max(1, int(min(pix.width / max(w * 5, 1), pix.height / max(h * 5, 1))))
     a = a[::step, ::step]
     ink = a[..., 3] >= 128
     if not ink.any():
         return
     rgb = a[..., :3][ink].astype(np.float32).mean(axis=0) / 255.0
-    rows, cols = ink.shape
-    sx, sy = w / cols, h / rows
-    der = page.derotation_matrix
-    sh = page.new_shape()
-    edge = np.diff(np.pad(ink.astype(np.int8), ((0, 0), (1, 1))), axis=1)
-    for r_ in range(rows):
-        starts = np.flatnonzero(edge[r_] == 1)
-        ends = np.flatnonzero(edge[r_] == -1)
-        for c0, c1 in zip(starts, ends):
-            q = fitz.Rect(float(x + c0 * sx), float(y + r_ * sy), float(x + c1 * sx), float(y + (r_ + 1.05) * sy)).quad * der
-            sh.draw_quad(q)
-    sh.finish(color=None, fill=tuple(float(v) for v in rgb), width=0, closePath=True)
-    sh.commit(overlay=True)
+    page.show_pdf_page(r, _stencil_page(ink, rgb, w, h), 0, rotate=page.rotation, keep_proportion=False, overlay=True)
+
+
+def unembedded_fonts(doc):
+    """names of fonts used in the document that are not inside the file (offices often refuse those)"""
+    out = set()
+    for pg in doc:
+        for f in pg.get_fonts(full=True):
+            if f[1] in ("n/a", "") and f[2] != "Type3":
+                out.add(f[3] or f[4])
+    return sorted(out)
 
 
 # ---------------------------------------------------------------- upload copy

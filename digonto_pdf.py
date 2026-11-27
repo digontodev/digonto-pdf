@@ -2033,7 +2033,22 @@ class DocTab(QWidget):
         self.name = os.path.basename(path)
         add_recent_pdf(path)
         self.set_modified(False)
+        self._font_hint(path)
         return True
+
+    def _font_hint(self, path):
+        """offices (Arbeitsagentur, Finanzamt …) refuse PDFs whose letters are not in the file: say so, once per file"""
+        try:
+            bad = pdf_safe.unembedded_fonts(self.doc)
+        except Exception:
+            return
+        if not bad or getattr(self, "_hinted", None) == path:
+            return
+        self._hinted = path
+        QMessageBox.information(self, APP_NAME,
+            "Saved.\n\nThis PDF uses fonts that are not inside the file (" + ", ".join(bad[:4]) + ("…" if len(bad) > 4 else "") + ").\n"
+            "Office websites (Arbeitsagentur, Finanzamt, Jobcenter …) often refuse such files.\n\n"
+            "Before you upload it, use File → Save for upload (Ctrl+Alt+S).")
 
     def save_for_upload(self):
         """a copy that government upload portals accept (they turn every upload into PDF/A)"""
