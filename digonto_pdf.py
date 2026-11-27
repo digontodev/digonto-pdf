@@ -129,6 +129,18 @@ def open_pdf(parent, path):
     return doc
 
 
+def office_mode():
+    """Settings: make every PDF Digonto saves acceptable for office websites (on unless switched off)"""
+    return settings().value("office_ready", True, type=bool)
+
+
+def office_bytes(data):
+    """bytes of a PDF about to be written: made office-ready when that setting is on"""
+    if office_mode() and isinstance(data, (bytes, bytearray)) and data[:5] == b"%PDF-":
+        return pdf_safe.office_ready(bytes(data))
+    return data
+
+
 def save_doc(parent, doc, path, **kw):
     """Save to a temp file first, then move into place (safe even when
     overwriting the file that was opened)."""
@@ -137,8 +149,15 @@ def save_doc(parent, doc, path, **kw):
     fd, tmp = tempfile.mkstemp(suffix=".pdf", dir=folder)
     os.close(fd)
     try:
-        if doc.is_encrypted:
+        if doc.is_encrypted or kw.get("encryption"):
             doc.save(tmp, garbage=3, deflate=True, **kw)
+        elif office_mode():
+            copy = fitz.open(stream=doc.tobytes(), filetype="pdf")
+            pdf_safe.finish(copy)                                      # only the letters used go into the file
+            data = copy.tobytes(garbage=3, deflate=True)
+            copy.close()
+            with open(tmp, "wb") as fh:                               # embedded fonts, no forms, no see-through parts
+                fh.write(office_bytes(data))
         else:
             copy = fitz.open(stream=doc.tobytes(), filetype="pdf")    # a copy: the open document keeps its full fonts
             pdf_safe.finish(copy)                                      # only the letters used go into the file
@@ -2042,7 +2061,7 @@ class DocTab(QWidget):
             bad = pdf_safe.unembedded_fonts(self.doc)
         except Exception:
             return
-        if not bad or getattr(self, "_hinted", None) == path:
+        if not bad or office_mode() or getattr(self, "_hinted", None) == path:
             return
         self._hinted = path
         QMessageBox.information(self, APP_NAME,
@@ -2295,6 +2314,12 @@ class MainWindow(QMainWindow):
         m.addAction("About Digonto PDF", self.about)
         m.addAction("Keyboard shortcuts", lambda: ui.show_all_shortcuts(self, APP_NAME))
         m.addSeparator()
+        a = m.addAction("Office-ready PDFs (Arbeitsagentur, Finanzamt …) when saving")
+        a.setCheckable(True)
+        a.setChecked(office_mode())
+        a.setToolTip("Fonts go inside the file, forms become fixed, and pages that offices would refuse become clean pictures with searchable text")
+        a.toggled.connect(lambda on: settings().setValue("office_ready", on))
+        m.addSeparator()
         m.addAction("Clear the recent files list", self._clear_recent)
         m.addAction("Clear recent tools and favourites", self._clear_tools)
         b = self.rail.button("settings")
@@ -2516,7 +2541,7 @@ class MainWindow(QMainWindow):
             if not p.lower().endswith(ext.lower()):
                 p += ext
             with open(p, "wb") as f:
-                f.write(data)
+                f.write(office_bytes(data))
             remember_dir(p)
             self.tools.show_result(f"Saved: {os.path.basename(p)}")
             self._offer_open(p)
@@ -2698,7 +2723,7 @@ class MainWindow(QMainWindow):
             if isinstance(f["result"], list):
                 for name, data in f["result"]:
                     with open(unique_path(os.path.join(folder, name)), "wb") as fh:
-                        fh.write(data)
+                        fh.write(office_bytes(data))
                     n += 1
             else:
                 target = os.path.join(folder, f["name"])
@@ -2707,7 +2732,7 @@ class MainWindow(QMainWindow):
                 else:
                     target = unique_path(target)
                 with open(target, "wb") as fh:
-                    fh.write(f["result"])
+                    fh.write(office_bytes(f["result"]))
                 n += 1
         remember_dir(os.path.join(folder, "x"))
         self.tools.show_result(f"Saved {n} file(s) in {os.path.basename(folder) or folder}.")

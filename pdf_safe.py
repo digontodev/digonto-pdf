@@ -10,6 +10,7 @@ drawn as solid ink shapes instead of see-through pictures.
 scripts, attachments, bookmarks and tags removed, and any page that would still break the
 conversion is turned into a clean picture page.
 """
+import math
 import os
 
 try:
@@ -126,7 +127,58 @@ def page_problems(doc, pno):
     return out
 
 
-def upload_copy(data, as_picture=False, dpi=200, password=None):
+def _picture_page(out, src, dpi):
+    """the page as a clean picture, with its text kept as invisible text (embedded font) so it can still be
+    searched, selected and copied - like a scanned page with OCR"""
+    pg = out.new_page(width=src.rect.width, height=src.rect.height)
+    pix = src.get_pixmap(dpi=dpi, alpha=False)
+    pg.insert_image(pg.rect, stream=pix.tobytes("jpeg", jpg_quality=92))
+    try:
+        kw = font_kw("helv")
+        for b in src.get_text("dict")["blocks"]:
+            for ln in b.get("lines", []):
+                dx, dy = ln.get("dir", (1, 0))
+                ang = round(math.degrees(math.atan2(-dy, dx)) / 90.0) * 90 % 360
+                for sp in ln["spans"]:
+                    t = sp["text"]
+                    if not t.strip():
+                        continue
+                    size = max(1.0, sp["size"])
+                    if ang == 0:                       # stretch so the invisible words sit exactly over the visible ones
+                        want = sp["bbox"][2] - sp["bbox"][0]
+                        have = text_length(t, "helv", size) or 1
+                        size = max(1.0, min(size * 3, size * want / have)) if want > 0 else size
+                    pg.insert_text(fitz.Point(sp["origin"]), t, fontsize=size, render_mode=3, rotate=ang, **kw)
+    except Exception:
+        pass
+    return pg
+
+
+def needs_office_fix(data):
+    """True when this PDF has something office systems refuse (fonts not in the file, see-through pictures, forms, scripts)"""
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:
+        return False
+    if doc.needs_pass or doc.is_encrypted:
+        return False
+    if doc.is_form_pdf:
+        return True
+    return any(page_problems(doc, i) for i in range(doc.page_count))
+
+
+def office_ready(data, dpi=300):
+    """for Save / Save as / tool results: the same file, made acceptable for offices, keeping links and bookmarks.
+    Untouched when nothing needs fixing, or when the file has a password."""
+    if not needs_office_fix(data):
+        return data
+    try:
+        return upload_copy(data, dpi=dpi, keep_nav=True)[0]
+    except Exception:
+        return data
+
+
+def upload_copy(data, as_picture=False, dpi=200, password=None, keep_nav=False):
     """make a copy that government upload portals accept. Returns (pdf bytes, pages turned into pictures)"""
     doc = fitz.open(stream=data, filetype="pdf")
     if doc.needs_pass:
@@ -142,12 +194,14 @@ def upload_copy(data, as_picture=False, dpi=200, password=None):
                   thumbnails=True, xml_metadata=True)
     except Exception:
         pass
-    try:
-        doc.set_toc([])                              # no bookmarks
-    except Exception:
-        pass
+    toc = doc.get_toc(simple=False) if keep_nav else []
+    if not keep_nav:
+        try:
+            doc.set_toc([])                          # no bookmarks
+        except Exception:
+            pass
     cat = doc.pdf_catalog()
-    for key in ("AcroForm", "StructTreeRoot", "MarkInfo", "OpenAction", "AA", "Names", "OCProperties", "Outlines"):
+    for key in ("AcroForm", "StructTreeRoot", "MarkInfo", "OpenAction", "AA", "Names", "OCProperties") + (() if keep_nav else ("Outlines",)):
         try:
             doc.xref_set_key(cat, key, "null")
         except Exception:
@@ -157,13 +211,20 @@ def upload_copy(data, as_picture=False, dpi=200, password=None):
     pictures = []
     for i in range(doc.page_count):
         if as_picture or page_problems(doc, i):
-            src = doc[i]
-            pg = out.new_page(width=src.rect.width, height=src.rect.height)
-            pix = src.get_pixmap(dpi=dpi, alpha=False)
-            pg.insert_image(pg.rect, stream=pix.tobytes("jpeg", jpg_quality=90))
+            pg = _picture_page(out, doc[i], dpi)
+            if keep_nav:
+                for ln in doc[i].get_links():
+                    if ln.get("kind") == fitz.LINK_URI:
+                        pg.insert_link(ln)
             pictures.append(i + 1)
         else:
-            out.insert_pdf(doc, from_page=i, to_page=i, annots=False, links=False)
+            out.insert_pdf(doc, from_page=i, to_page=i, annots=False, links=keep_nav)
+    if keep_nav and toc:
+        try:
+            out.set_toc(toc)
+        except Exception:
+            pass
+    finish(out)                                       # the invisible text layer: only the letters used
     meta = {k: v for k, v in (doc.metadata or {}).items() if k in ("title", "author", "subject", "keywords")}
     meta.update(producer="Digonto PDF", creator="Digonto PDF")
     out.set_metadata(meta)
