@@ -196,6 +196,37 @@ def office_ready(data, dpi=200):
         return data
 
 
+def shrink_images(doc, max_dpi=215, target=200):
+    """pictures shown sharper than max_dpi are scaled to target dpi (JPEG, RGB, no colour profile)"""
+    done = set()
+    for page in doc:
+        for im in page.get_images(full=True):
+            xref, smask, w, h, bpc = im[0], im[1], im[2], im[3], im[4]
+            if xref in done or smask or bpc == 1 or w * h < 400 * 400:
+                continue
+            rects = page.get_image_rects(xref)
+            if not rects:
+                continue
+            r = max(rects, key=lambda q: abs(q))
+            if r.width <= 0 or r.height <= 0:
+                continue
+            dpi = max(w / (r.width / 72.0), h / (r.height / 72.0))
+            if dpi <= max_dpi:
+                continue
+            try:
+                pix = fitz.Pixmap(doc, xref)
+                if pix.alpha or pix.colorspace is None or pix.colorspace.n not in (1, 3):
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                    if pix.alpha:
+                        pix = fitz.Pixmap(pix, 0)
+                k = target / dpi
+                small = fitz.Pixmap(pix, max(1, int(w * k)), max(1, int(h * k)), None)
+                page.replace_image(xref, stream=small.tobytes("jpeg", jpg_quality=90))
+                done.add(xref)
+            except Exception:
+                continue
+
+
 def upload_copy(data, as_picture=False, dpi=200, password=None, keep_nav=False):
     """make a copy that government upload portals accept. Returns (pdf bytes, pages turned into pictures)"""
     doc = fitz.open(stream=data, filetype="pdf")
@@ -212,6 +243,9 @@ def upload_copy(data, as_picture=False, dpi=200, password=None, keep_nav=False):
                   thumbnails=True, xml_metadata=True)
     except Exception:
         pass
+    # pictures sharper than 200 dpi are scaled down: upload portals refused a page picture at 300 dpi and
+    # accepted the same page at 200 dpi (also keeps the file small)
+    shrink_images(doc)
     toc = doc.get_toc(simple=False) if keep_nav else []
     if not keep_nav:
         try:
