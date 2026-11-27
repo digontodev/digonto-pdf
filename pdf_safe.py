@@ -1,6 +1,6 @@
-"""Digonto PDF - PDFs that offices accept.
+"""Digonto PDF - PDFs that official upload portals accept.
 
-Government upload portals (Arbeitsagentur, Finanzamt, ...) convert every upload to PDF/A,
+Government and other official upload portals convert every upload to PDF/A,
 the archive format. Two things break that conversion, and Digonto used to add both:
   * text in a font that is not inside the file (the built-in "Helvetica")
   * pictures with a see-through background (a signature on a soft mask)
@@ -102,7 +102,7 @@ def place_signature(page, rect_displayed, png):
 
 
 def unembedded_fonts(doc):
-    """names of fonts used in the document that are not inside the file (offices often refuse those)"""
+    """names of fonts used in the document that are not inside the file (upload portals often refuse those)"""
     out = set()
     for pg in doc:
         for f in pg.get_fonts(full=True):
@@ -155,7 +155,7 @@ def _picture_page(out, src, dpi):
 
 
 def needs_office_fix(data):
-    """True when this PDF has something office systems refuse (fonts not in the file, see-through pictures, forms, scripts)"""
+    """True when this PDF has something upload portals refuse (fonts not in the file, see-through pictures, forms, scripts)"""
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception:
@@ -167,13 +167,15 @@ def needs_office_fix(data):
     return any(page_problems(doc, i) for i in range(doc.page_count))
 
 
-def office_ready(data, dpi=300):
-    """for Save / Save as / tool results: the same file, made acceptable for offices, keeping links and bookmarks.
-    Untouched when nothing needs fixing, or when the file has a password."""
-    if not needs_office_fix(data):
-        return data
+def office_ready(data, dpi=200):
+    """for Save / Save as / tool results: exactly the steps of Save for upload (that is what upload portals accepted
+    in tests; a lighter version that kept links and bookmarks was refused). Files with a password stay as they are."""
     try:
-        return upload_copy(data, dpi=dpi, keep_nav=True)[0]
+        doc = fitz.open(stream=data, filetype="pdf")
+        if doc.needs_pass or doc.is_encrypted:
+            return data
+        doc.close()
+        return upload_copy(data, dpi=dpi)[0]
     except Exception:
         return data
 

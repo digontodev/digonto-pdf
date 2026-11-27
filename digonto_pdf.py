@@ -130,12 +130,12 @@ def open_pdf(parent, path):
 
 
 def office_mode():
-    """Settings: make every PDF Digonto saves acceptable for office websites (on unless switched off)"""
+    """Settings: every PDF Digonto saves is made upload-ready (on unless switched off)"""
     return settings().value("office_ready", True, type=bool)
 
 
 def office_bytes(data):
-    """bytes of a PDF about to be written: made office-ready when that setting is on"""
+    """bytes of a PDF about to be written: made upload-ready (the same steps as Save for upload) when that setting is on"""
     if office_mode() and isinstance(data, (bytes, bytearray)) and data[:5] == b"%PDF-":
         return pdf_safe.office_ready(bytes(data))
     return data
@@ -2056,7 +2056,7 @@ class DocTab(QWidget):
         return True
 
     def _font_hint(self, path):
-        """offices (Arbeitsagentur, Finanzamt …) refuse PDFs whose letters are not in the file: say so, once per file"""
+        """upload portals often refuse PDFs whose letters are not in the file: say so, once per file"""
         try:
             bad = pdf_safe.unembedded_fonts(self.doc)
         except Exception:
@@ -2066,14 +2066,14 @@ class DocTab(QWidget):
         self._hinted = path
         QMessageBox.information(self, APP_NAME,
             "Saved.\n\nThis PDF uses fonts that are not inside the file (" + ", ".join(bad[:4]) + ("…" if len(bad) > 4 else "") + ").\n"
-            "Office websites (Arbeitsagentur, Finanzamt, Jobcenter …) often refuse such files.\n\n"
+            "Official upload websites often refuse such files.\n\n"
             "Before you upload it, use File → Save for upload (Ctrl+Alt+S).")
 
     def save_for_upload(self):
         """a copy that government upload portals accept (they turn every upload into PDF/A)"""
         self.apply_pending()
         box = QMessageBox(QMessageBox.Question, APP_NAME,
-                          "Save a copy for uploading to an office website (Arbeitsagentur, Finanzamt, Jobcenter …)?\n\n"
+                          "Save a copy that official upload websites accept (government, tax, job or health portals)?\n\n"
                           "Form fields and notes become part of the page, scripts, attachments and bookmarks are "
                           "removed, and any page that could still be refused is turned into a clean picture.", parent=self)
         normal = box.addButton("Save copy", QMessageBox.AcceptRole)
@@ -2104,9 +2104,9 @@ class DocTab(QWidget):
         size = os.path.getsize(p)
         note = ""
         if pics and box.clickedButton() is not pic:
-            note = f"\n\nPage(s) {', '.join(map(str, pics))} had something offices refuse, so they are now pictures."
+            note = f"\n\nPage(s) {', '.join(map(str, pics))} had something upload websites refuse, so they are now pictures."
         if size > 9 * 1024 * 1024:
-            note += "\n\nThe file is larger than 9 MB, which many office websites refuse: use Compress first."
+            note += "\n\nThe file is larger than 9 MB, which many upload websites refuse: use Compress first."
         QMessageBox.information(self, APP_NAME, f"Saved for upload:\n{p}\n({human(size)}){note}")
         return True
 
@@ -2260,7 +2260,7 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self.act_save = act(fm, "Save", "Ctrl+S", lambda: self._cur() and self._cur().save())
         self.act_saveas = act(fm, "Save as...", "Ctrl+Shift+S", lambda: self._cur() and self._cur().save(True))
-        self.act_upload = act(fm, "Save for upload (Arbeitsagentur, Finanzamt …)…", "Ctrl+Alt+S",
+        self.act_upload = act(fm, "Save for upload…", "Ctrl+Alt+S",
                               lambda: self._cur() and self._cur().save_for_upload())
         self.act_print = act(fm, "Print...", "Ctrl+P", self.print_current)
         act(fm, "Two sides on one page (ID card)...", None, self.two_sides)
@@ -2299,7 +2299,7 @@ class MainWindow(QMainWindow):
         d = self._cur()
         m = QMenu(self)
         m.addAction("Save as …", lambda: d and d.save(True)).setEnabled(d is not None)
-        m.addAction("Save for upload (Arbeitsagentur, Finanzamt …) …", lambda: d and d.save_for_upload()).setEnabled(d is not None)
+        m.addAction("Save for upload …", lambda: d and d.save_for_upload()).setEnabled(d is not None)
         m.addSeparator()
         for key in ("pdf2img", "pdf2word", "pdf2text", "extract"):
             t = ops.TOOL[key]
@@ -2314,10 +2314,10 @@ class MainWindow(QMainWindow):
         m.addAction("About Digonto PDF", self.about)
         m.addAction("Keyboard shortcuts", lambda: ui.show_all_shortcuts(self, APP_NAME))
         m.addSeparator()
-        a = m.addAction("Office-ready PDFs (Arbeitsagentur, Finanzamt …) when saving")
+        a = m.addAction("Upload-ready PDFs when saving")
         a.setCheckable(True)
         a.setChecked(office_mode())
-        a.setToolTip("Fonts go inside the file, forms become fixed, and pages that offices would refuse become clean pictures with searchable text")
+        a.setToolTip("Every save is made like Save for upload: fonts inside the file, forms fixed, and pages that upload websites would refuse become clean pictures with searchable text")
         a.toggled.connect(lambda on: settings().setValue("office_ready", on))
         m.addSeparator()
         m.addAction("Clear the recent files list", self._clear_recent)
