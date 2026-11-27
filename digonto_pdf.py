@@ -152,12 +152,10 @@ def save_doc(parent, doc, path, **kw):
         if doc.is_encrypted or kw.get("encryption"):
             doc.save(tmp, garbage=3, deflate=True, **kw)
         elif office_mode():
-            copy = fitz.open(stream=doc.tobytes(), filetype="pdf")
-            pdf_safe.finish(copy)                                      # only the letters used go into the file
-            data = copy.tobytes(garbage=3, deflate=True)
-            copy.close()
-            with open(tmp, "wb") as fh:                               # embedded fonts, no forms, no see-through parts
-                fh.write(office_bytes(data))
+            # exactly what Save for upload does (same input, same steps): fonts are trimmed only once
+            data, _pics = pdf_safe.upload_copy(doc.tobytes())
+            with open(tmp, "wb") as fh:
+                fh.write(data)
         else:
             copy = fitz.open(stream=doc.tobytes(), filetype="pdf")    # a copy: the open document keeps its full fonts
             pdf_safe.finish(copy)                                      # only the letters used go into the file
