@@ -2071,21 +2071,23 @@ class DocTab(QWidget):
 
     def save_for_upload(self):
         """one click: every page as a clean 200 dpi picture with its text kept as invisible, searchable text.
-        That is what official upload portals accepted every time. Saved next to the original as "name (upload).pdf"."""
+        That is what official upload portals accepted every time. Saved under the same name, like Save."""
         self.apply_pending()
         base = os.path.splitext(self.name)[0]
         if self.path:
-            p = unique_path(os.path.join(os.path.dirname(self.path), base + " (upload).pdf"))
+            p = self.path
         else:                                       # never saved yet: ask where
-            p, _ = QFileDialog.getSaveFileName(self, "Save for upload", os.path.join(last_dir(), base + " (upload).pdf"), PDF_FILTER)
+            p, _ = QFileDialog.getSaveFileName(self, "Save for upload", os.path.join(last_dir(), base + ".pdf"), PDF_FILTER)
             if not p:
                 return False
             p = ensure_pdf_ext(p)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             data, _pics = pdf_safe.upload_copy(self.doc.tobytes(), as_picture=True, dpi=200, password=self.password)
-            with open(p, "wb") as fh:
+            tmp = p + ".digonto-tmp"
+            with open(tmp, "wb") as fh:             # written next to it first, then swapped in: never a half-written file
                 fh.write(data)
+            os.replace(tmp, p)
         except Exception as e:
             QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, APP_NAME, f"Could not make the upload copy:\n{e}")
@@ -2093,6 +2095,9 @@ class DocTab(QWidget):
         QApplication.restoreOverrideCursor()
         remember_dir(p)
         add_recent_pdf(p)
+        if not self.path:
+            self.path, self.name = p, os.path.basename(p)
+        self.set_modified(False)
         size = os.path.getsize(p)
         note = ""
         if size > 9 * 1024 * 1024:
