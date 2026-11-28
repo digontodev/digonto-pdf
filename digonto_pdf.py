@@ -2070,28 +2070,20 @@ class DocTab(QWidget):
             "Before you upload it, use File → Save for upload (Ctrl+Alt+S).")
 
     def save_for_upload(self):
-        """a copy that government upload portals accept (they turn every upload into PDF/A)"""
+        """one click: every page as a clean 200 dpi picture with its text kept as invisible, searchable text.
+        That is what official upload portals accepted every time. Saved next to the original as "name (upload).pdf"."""
         self.apply_pending()
-        box = QMessageBox(QMessageBox.Question, APP_NAME,
-                          "Save a copy that official upload websites accept (government, tax, job or health portals)?\n\n"
-                          "Form fields and notes become part of the page, scripts, attachments and bookmarks are "
-                          "removed, and any page that could still be refused is turned into a clean picture.", parent=self)
-        normal = box.addButton("Save copy", QMessageBox.AcceptRole)
-        pic = box.addButton("All pages as pictures (always accepted)", QMessageBox.ActionRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
-        box.setDefaultButton(normal)
-        box.exec()
-        if box.clickedButton() not in (normal, pic):
-            return False
         base = os.path.splitext(self.name)[0]
-        start = os.path.join(os.path.dirname(self.path) if self.path else last_dir(), base + " (upload).pdf")
-        p, _ = QFileDialog.getSaveFileName(self, "Save copy for upload", start, PDF_FILTER)
-        if not p:
-            return False
-        p = ensure_pdf_ext(p)
+        if self.path:
+            p = unique_path(os.path.join(os.path.dirname(self.path), base + " (upload).pdf"))
+        else:                                       # never saved yet: ask where
+            p, _ = QFileDialog.getSaveFileName(self, "Save for upload", os.path.join(last_dir(), base + " (upload).pdf"), PDF_FILTER)
+            if not p:
+                return False
+            p = ensure_pdf_ext(p)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            data, pics = pdf_safe.upload_copy(self.doc.tobytes(), as_picture=box.clickedButton() is pic, password=self.password)
+            data, _pics = pdf_safe.upload_copy(self.doc.tobytes(), as_picture=True, dpi=200, password=self.password)
             with open(p, "wb") as fh:
                 fh.write(data)
         except Exception as e:
@@ -2103,11 +2095,9 @@ class DocTab(QWidget):
         add_recent_pdf(p)
         size = os.path.getsize(p)
         note = ""
-        if pics and box.clickedButton() is not pic:
-            note = f"\n\nPage(s) {', '.join(map(str, pics))} had something upload websites refuse, so they are now pictures."
         if size > 9 * 1024 * 1024:
-            note += "\n\nThe file is larger than 9 MB, which many upload websites refuse: use Compress first."
-        QMessageBox.information(self, APP_NAME, f"Saved for upload:\n{p}\n({human(size)}){note}")
+            note = "\n\nThe file is larger than 9 MB, which many upload websites refuse: use Compress first."
+        QMessageBox.information(self, APP_NAME, f"Saved, ready for upload:\n{p}\n({human(size)}){note}")
         return True
 
     def maybe_close(self):
