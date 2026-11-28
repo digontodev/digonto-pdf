@@ -31,6 +31,7 @@ import digonto_convert as conv
 import digonto_ui as ui
 import pdf_ops as ops
 import pdf_panel as panel
+import pdf_safe
 from PySide6.QtCore import (QByteArray, QBuffer, QIODevice, QItemSelectionModel, QPointF, QRect, QTimer, QUrl,
                             QRectF, QSettings, QSize, QStandardPaths, Qt,
                             QThread, Signal)
@@ -128,6 +129,18 @@ def open_pdf(parent, path):
     return doc
 
 
+def office_mode():
+    """Settings: every PDF Digonto saves is made upload-ready (on unless switched off)"""
+    return settings().value("office_ready", True, type=bool)
+
+
+def office_bytes(data):
+    """bytes of a PDF about to be written: made upload-ready (the same steps as Save for upload) when that setting is on"""
+    if office_mode() and isinstance(data, (bytes, bytearray)) and data[:5] == b"%PDF-":
+        return pdf_safe.office_ready(bytes(data))
+    return data
+
+
 def save_doc(parent, doc, path, **kw):
     """Save to a temp file first, then move into place (safe even when
     overwriting the file that was opened)."""
@@ -136,7 +149,18 @@ def save_doc(parent, doc, path, **kw):
     fd, tmp = tempfile.mkstemp(suffix=".pdf", dir=folder)
     os.close(fd)
     try:
-        doc.save(tmp, garbage=3, deflate=True, **kw)
+        if doc.is_encrypted or kw.get("encryption"):
+            doc.save(tmp, garbage=3, deflate=True, **kw)
+        elif office_mode():
+            # exactly what Save for upload does (same input, same steps): fonts are trimmed only once
+            data, _pics = pdf_safe.upload_copy(doc.tobytes(), as_picture=True, dpi=200)
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+        else:
+            copy = fitz.open(stream=doc.tobytes(), filetype="pdf")    # a copy: the open document keeps its full fonts
+            pdf_safe.finish(copy)                                      # only the letters used go into the file
+            copy.save(tmp, garbage=3, deflate=True, **kw)
+            copy.close()
         os.replace(tmp, path)
     except Exception as e:
         try:
@@ -833,11 +857,7 @@ def place_image_on_page(page, rect_displayed, png):
     """rect_displayed is in the coordinates of the page as you see it
     (rotation applied). Converts to PDF coordinates and inserts the image
     upright."""
-    r = fitz.Rect(rect_displayed.x(), rect_displayed.y(),
-                  rect_displayed.x() + rect_displayed.width(), rect_displayed.y() + rect_displayed.height())
-    r = r * page.derotation_matrix
-    page.insert_image(r, stream=png, rotate=page.rotation,
-                      keep_proportion=False, overlay=True)
+    pdf_safe.place_signature(page, (rect_displayed.x(), rect_displayed.y(), rect_displayed.width(), rect_displayed.height()), png)
 
 
 
@@ -922,7 +942,7 @@ def redact_text(page, rect_unrot, fill=False):
 def insert_text_upright(page, point_displayed, v):
     """Insert text so it reads normally on the page as displayed."""
     p = fitz.Point(point_displayed.x(), point_displayed.y()) * page.derotation_matrix
-    page.insert_text(p, v["text"], fontsize=v["size"], fontname=v["fontname"], color=v["color"],
+    page.insert_text(p, v["text"], fontsize=v["size"], **pdf_safe.font_kw(v["fontname"]), color=v["color"],
                      rotate=page.rotation)
 
 
@@ -1441,12 +1461,24 @@ class DocTab(QWidget):
         self.strip_lay.addWidget(lb)
         return lb
 
+    @staticmethod
+    def _clear_layout(lay):
+        while lay is not None and lay.count():
+            item = lay.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+                item.widget().deleteLater()
+            elif item.layout() is not None:
+                DocTab._clear_layout(item.layout())
+
     def set_tool(self, name, layout=None):
         """name: pages | sign | edit | redact | None.  The controls go into `layout` (the tools panel)."""
+        prev, self.tool = self.tool, name          # set first: saving below must not open the tool a second time
         self.apply_pending()
         if layout is not None:
             self.strip_lay = layout
-        self.tool = name
+        if name is not None and getattr(self, "strip_lay", None) is not None:
+            self._clear_layout(self.strip_lay)      # never two sets of buttons in the panel
         self.view.mode = None
         self.view.unsetCursor()
         self.clear_hl()
@@ -1659,7 +1691,7 @@ class DocTab(QWidget):
             txt = {"1": f"{i + 1}", "Page 1": f"Page {i + 1}", "1 / N": f"{i + 1} / {n}",
                    "Page 1 of N": f"Page {i + 1} of {n}"}[fmt]
             r = p.rect
-            w = fitz.get_text_length(txt, fontname="helv", fontsize=10)
+            w = pdf_safe.text_length(txt, "helv", 10)
             x = {"centre": (r.width - w) / 2, "right": r.width - w - 36, "left": 36}[pos.split()[1]]
             y = r.height - 24 if pos.startswith("Bottom") else 36
             insert_text_upright(p, QPointF(x, y), dict(text=txt, size=10.0, fontname="helv", color=(0.2, 0.2, 0.2)))
@@ -1675,10 +1707,10 @@ class DocTab(QWidget):
         for p in self.doc:
             r = p.rect
             size = min(r.width, r.height) / max(len(txt), 3) * 1.5
-            w = fitz.get_text_length(txt, fontname="hebo", fontsize=size)
+            w = pdf_safe.text_length(txt, "hebo", size)
             c = fitz.Point(r.width / 2, r.height / 2)
             start = fitz.Point(c.x - w / 2, c.y + size / 3)
-            p.insert_text(start * p.derotation_matrix, txt, fontsize=size, fontname="hebo", color=(0.6, 0.6, 0.6),
+            p.insert_text(start * p.derotation_matrix, txt, fontsize=size, **pdf_safe.font_kw("hebo"), color=(0.6, 0.6, 0.6),
                           fill_opacity=0.35, morph=(c * p.derotation_matrix, fitz.Matrix(45)), overlay=True)
         self.set_modified(True)
         self.show_current()
@@ -1814,10 +1846,13 @@ class DocTab(QWidget):
         c = self.view.mapToScene(self.view.viewport().rect().center())
         sig.setPos(min(max(0, c.x() - sig.w / 2), page.rect.width - sig.w),
                    min(max(0, c.y() - sig.h / 2), page.rect.height - sig.h))
+        n = len(self.pending.get(self.cur, []))
+        sig.moveBy(12 * (n % 5), 12 * (n % 5))      # each new one a little lower right, so it is not hidden under the last
         sc = self.view.scene()
         sc.addItem(sig)
         sc.clearSelection()
         sig.setSelected(True)
+        self.view.ensureVisible(sig)
         self.pending.setdefault(self.cur, []).append(sig)
         self.set_modified(True)
 
@@ -1962,11 +1997,13 @@ class DocTab(QWidget):
         else:
             wd = unrot.width
             r = fitz.Rect(unrot.x0 + wd * 0.15, unrot.y0 - 0.5, unrot.x1 - wd * 0.15, unrot.y1 + 0.5)
-        redact_text(page, r)
+        picture = pdf_safe.is_picture_page(page)
+        # on a picture page the old words are pixels of the picture: cover them with white, then write the new text
+        redact_text(page, r, fill=(1, 1, 1) if picture else False)
         if v["text"].strip():
             angle = int(round(math.degrees(math.atan2(-dy, dx)) / 90.0)) * 90 % 360
             page.insert_text(fitz.Point(s0["origin"]), v["text"], fontsize=v["size"],
-                             fontname=v["fontname"], color=v["color"], rotate=angle)
+                             **pdf_safe.font_kw(v["fontname"]), color=v["color"], rotate=angle)
         self._edited()
 
     def on_rect(self, r):
@@ -2015,6 +2052,57 @@ class DocTab(QWidget):
         self.name = os.path.basename(path)
         add_recent_pdf(path)
         self.set_modified(False)
+        self._font_hint(path)
+        return True
+
+    def _font_hint(self, path):
+        """upload portals often refuse PDFs whose letters are not in the file: say so, once per file"""
+        try:
+            bad = pdf_safe.unembedded_fonts(self.doc)
+        except Exception:
+            return
+        if not bad or office_mode() or getattr(self, "_hinted", None) == path:
+            return
+        self._hinted = path
+        QMessageBox.information(self, APP_NAME,
+            "Saved.\n\nThis PDF uses fonts that are not inside the file (" + ", ".join(bad[:4]) + ("…" if len(bad) > 4 else "") + ").\n"
+            "Official upload websites often refuse such files.\n\n"
+            "Before you upload it, use File → Save for upload (Ctrl+Alt+S).")
+
+    def save_for_upload(self):
+        """one click: every page as a clean 200 dpi picture with its text kept as invisible, searchable text.
+        That is what official upload portals accepted every time. Saved under the same name, like Save."""
+        self.apply_pending()
+        base = os.path.splitext(self.name)[0]
+        if self.path:
+            p = self.path
+        else:                                       # never saved yet: ask where
+            p, _ = QFileDialog.getSaveFileName(self, "Save for upload", os.path.join(last_dir(), base + ".pdf"), PDF_FILTER)
+            if not p:
+                return False
+            p = ensure_pdf_ext(p)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data, _pics = pdf_safe.upload_copy(self.doc.tobytes(), as_picture=True, dpi=200, password=self.password)
+            tmp = p + ".digonto-tmp"
+            with open(tmp, "wb") as fh:             # written next to it first, then swapped in: never a half-written file
+                fh.write(data)
+            os.replace(tmp, p)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, APP_NAME, f"Could not make the upload copy:\n{e}")
+            return False
+        QApplication.restoreOverrideCursor()
+        remember_dir(p)
+        add_recent_pdf(p)
+        if not self.path:
+            self.path, self.name = p, os.path.basename(p)
+        self.set_modified(False)
+        size = os.path.getsize(p)
+        note = ""
+        if size > 9 * 1024 * 1024:
+            note = "\n\nThe file is larger than 9 MB, which many upload websites refuse: use Compress first."
+        QMessageBox.information(self, APP_NAME, f"Saved, ready for upload:\n{p}\n({human(size)}){note}")
         return True
 
     def maybe_close(self):
@@ -2167,6 +2255,8 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self.act_save = act(fm, "Save", "Ctrl+S", lambda: self._cur() and self._cur().save())
         self.act_saveas = act(fm, "Save as...", "Ctrl+Shift+S", lambda: self._cur() and self._cur().save(True))
+        self.act_upload = act(fm, "Save for upload…", "Ctrl+Alt+S",
+                              lambda: self._cur() and self._cur().save_for_upload())
         self.act_print = act(fm, "Print...", "Ctrl+P", self.print_current)
         act(fm, "Two sides on one page (ID card)...", None, self.two_sides)
         fm.addSeparator()
@@ -2204,6 +2294,7 @@ class MainWindow(QMainWindow):
         d = self._cur()
         m = QMenu(self)
         m.addAction("Save as …", lambda: d and d.save(True)).setEnabled(d is not None)
+        m.addAction("Save for upload …", lambda: d and d.save_for_upload()).setEnabled(d is not None)
         m.addSeparator()
         for key in ("pdf2img", "pdf2word", "pdf2text", "extract"):
             t = ops.TOOL[key]
@@ -2217,6 +2308,12 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         m.addAction("About Digonto PDF", self.about)
         m.addAction("Keyboard shortcuts", lambda: ui.show_all_shortcuts(self, APP_NAME))
+        m.addSeparator()
+        a = m.addAction("Upload-ready PDFs when saving")
+        a.setCheckable(True)
+        a.setChecked(office_mode())
+        a.setToolTip("Every save and export is made like Save for upload: each page a clean 200 dpi picture with searchable text, accepted by upload websites. Switch off to save PDFs whose text stays editable in other programs.")
+        a.toggled.connect(lambda on: settings().setValue("office_ready", on))
         m.addSeparator()
         m.addAction("Clear the recent files list", self._clear_recent)
         m.addAction("Clear recent tools and favourites", self._clear_tools)
@@ -2252,7 +2349,7 @@ class MainWindow(QMainWindow):
     def _tab_changed(self, *_):
         d = self._cur()
         batch = len(self.batch.files) if self.centre.currentIndex() == 2 else 0
-        for a in (self.act_save, self.act_saveas, self.act_close, self.act_undo, self.act_print):
+        for a in (self.act_save, self.act_saveas, self.act_upload, self.act_close, self.act_undo, self.act_print):
             a.setEnabled(d is not None)
         self.rail.set_enabled(["save", "print", "pen", "pages"], d is not None)
         self.rail.set_enabled(["export"], d is not None or batch > 0)
@@ -2439,7 +2536,7 @@ class MainWindow(QMainWindow):
             if not p.lower().endswith(ext.lower()):
                 p += ext
             with open(p, "wb") as f:
-                f.write(data)
+                f.write(office_bytes(data))
             remember_dir(p)
             self.tools.show_result(f"Saved: {os.path.basename(p)}")
             self._offer_open(p)
@@ -2621,7 +2718,7 @@ class MainWindow(QMainWindow):
             if isinstance(f["result"], list):
                 for name, data in f["result"]:
                     with open(unique_path(os.path.join(folder, name)), "wb") as fh:
-                        fh.write(data)
+                        fh.write(office_bytes(data))
                     n += 1
             else:
                 target = os.path.join(folder, f["name"])
@@ -2630,7 +2727,7 @@ class MainWindow(QMainWindow):
                 else:
                     target = unique_path(target)
                 with open(target, "wb") as fh:
-                    fh.write(f["result"])
+                    fh.write(office_bytes(f["result"]))
                 n += 1
         remember_dir(os.path.join(folder, "x"))
         self.tools.show_result(f"Saved {n} file(s) in {os.path.basename(folder) or folder}.")

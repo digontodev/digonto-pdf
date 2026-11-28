@@ -24,6 +24,8 @@ try:
 except ImportError:                                      # older PyMuPDF
     import fitz
 
+import pdf_safe
+
 import pdf_scan as scan
 
 
@@ -112,10 +114,10 @@ def op_page_numbers(doc, o, progress=None, stop=None):
         last = n + first - 1
         txt = {"1": f"{k}", "Page 1": f"Page {k}", "1 / N": f"{k} / {last}", "Page 1 of N": f"Page {k} of {last}"}[look]
         r = p.rect                                    # displayed (rotated) size
-        w = fitz.get_text_length(txt, fontname="helv", fontsize=size)
+        w = pdf_safe.text_length(txt, "helv", size)
         x = {"centre": (r.width - w) / 2, "right": r.width - w - 36, "left": 36}[pos.split()[1]]
         y = r.height - 24 if pos.startswith("Bottom") else 24 + size
-        p.insert_text(fitz.Point(x, y) * p.derotation_matrix, txt, fontsize=size, fontname="helv",
+        p.insert_text(fitz.Point(x, y) * p.derotation_matrix, txt, fontsize=size, **pdf_safe.font_kw("helv"),
                       color=(0.2, 0.2, 0.2), rotate=p.rotation)
         _tick(progress, stop, (i + 1) / n)
     return f"Numbered {n} pages"
@@ -279,10 +281,10 @@ def op_watermark(doc, o, progress=None, stop=None):
         p = doc[i]
         r = p.rect
         size = min(r.width, r.height) / max(len(txt), 3) * (1.5 if angle else 1.2)
-        w = fitz.get_text_length(txt, fontname="hebo", fontsize=size)
+        w = pdf_safe.text_length(txt, "hebo", size)
         c = fitz.Point(r.width / 2, r.height / 2)
         start = fitz.Point(c.x - w / 2, c.y + size / 3)
-        p.insert_text(start * p.derotation_matrix, txt, fontsize=size, fontname="hebo", color=(0.55, 0.55, 0.55),
+        p.insert_text(start * p.derotation_matrix, txt, fontsize=size, **pdf_safe.font_kw("hebo"), color=(0.55, 0.55, 0.55),
                       fill_opacity=opacity, morph=(c * p.derotation_matrix, fitz.Matrix(angle - p.rotation)),
                       overlay=True)
         _tick(progress, stop, (k + 1) / len(pages))

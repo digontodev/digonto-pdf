@@ -63,3 +63,7 @@ Not (yet): headers/footers, text boxes, charts, footnotes, comments, old
 UNINSTALL
 ---------
   bash install-linux.sh --uninstall pdf       (Windows: install-windows.bat --uninstall pdf)
+
+Fonts bundled in assets/fonts (embedded into PDFs you edit, so upload portals accept them):
+Noto Sans and Fira Mono (SIL Open Font License 1.1), DejaVu Serif (Bitstream Vera licence).
+See assets/fonts/LICENSE-*.txt.
