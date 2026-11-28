@@ -184,14 +184,15 @@ def needs_office_fix(data):
 
 
 def office_ready(data, dpi=200):
-    """for Save / Save as / tool results: exactly the steps of Save for upload (that is what upload portals accepted
+    """for Save / Save as / Export / tool results: exactly what Save for upload does (every page a 200 dpi picture
+    with invisible searchable text) (that is what upload portals accepted
     in tests; a lighter version that kept links and bookmarks was refused). Files with a password stay as they are."""
     try:
         doc = fitz.open(stream=data, filetype="pdf")
         if doc.needs_pass or doc.is_encrypted:
             return data
         doc.close()
-        return upload_copy(data, dpi=dpi)[0]
+        return upload_copy(data, as_picture=True, dpi=dpi)[0]
     except Exception:
         return data
 

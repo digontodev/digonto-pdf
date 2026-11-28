@@ -153,7 +153,7 @@ def save_doc(parent, doc, path, **kw):
             doc.save(tmp, garbage=3, deflate=True, **kw)
         elif office_mode():
             # exactly what Save for upload does (same input, same steps): fonts are trimmed only once
-            data, _pics = pdf_safe.upload_copy(doc.tobytes())
+            data, _pics = pdf_safe.upload_copy(doc.tobytes(), as_picture=True, dpi=200)
             with open(tmp, "wb") as fh:
                 fh.write(data)
         else:
@@ -2312,7 +2312,7 @@ class MainWindow(QMainWindow):
         a = m.addAction("Upload-ready PDFs when saving")
         a.setCheckable(True)
         a.setChecked(office_mode())
-        a.setToolTip("Every save is made like Save for upload: fonts inside the file, forms fixed, and pages that upload websites would refuse become clean pictures with searchable text")
+        a.setToolTip("Every save and export is made like Save for upload: each page a clean 200 dpi picture with searchable text, accepted by upload websites. Switch off to save PDFs whose text stays editable in other programs.")
         a.toggled.connect(lambda on: settings().setValue("office_ready", on))
         m.addSeparator()
         m.addAction("Clear the recent files list", self._clear_recent)
